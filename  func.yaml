@@ -1,0 +1,6 @@
+schema_version: 20180708
+name: rag-ingestor
+version: 0.0.1
+runtime: docker
+memory: 512  # OCI-Specific Optimization: 512MB is a good balance for I/O tasks and fits the free tier.
+timeout: 120 # 2 minutes, sufficient for downloading and processing large files.
