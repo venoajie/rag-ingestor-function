@@ -35,4 +35,3 @@ COPY --from=build-stage /function/func.py .
 ENV PYTHONPATH=/function
 
 ENTRYPOINT ["fdk", "/function/func.py", "handler"]
-EOF
