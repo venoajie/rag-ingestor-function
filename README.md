@@ -22,8 +22,40 @@ Before you begin, ensure you have the following tools installed and configured:
 
 1.  **OCI CLI:** Installed and configured with a user profile (`~/.oci/config`).
 2.  **Docker:** Installed, running, and able to execute commands.
-3.  **Fn Project CLI:** The correct version for your CPU architecture.
-    *   **⚠️ Important:** The syntax of `fn` commands is highly version-dependent. This guide is tested with `v0.6.43`.
+3.  **Fn Project CLI:** The Fn Project CLI is required to interact with the OCI Functions service. The most reliable way to ensure compatibility is to build it from source. This guide requires Go 1.21 or newer.
+
+    *   **Installation Steps:**
+
+        1.  **Install Go (Golang):**
+            *   Check if Go is installed by running `go version`. If it's 1.21+ you can skip this step.
+            *   To install Go for your architecture (example for ARM64):
+                ```bash
+                # Download the latest Go binary for your architecture
+                wget https://go.dev/dl/go1.22.0.linux-arm64.tar.gz
+
+                # Remove any old Go installation and extract the new one
+                sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.22.0.linux-arm64.tar.gz
+
+                # Add Go to your PATH in your shell configuration file (~/.bashrc, ~/.zshrc, etc.)
+                echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+                source ~/.bashrc
+                ```
+
+        2.  **Build and Install the Fn CLI:**
+            ```bash
+            # Clone the official Fn Project CLI repository
+            git clone https://github.com/fnproject/cli.git fn-cli
+
+            # Navigate into the directory and build the binary
+            cd fn-cli
+            make build
+
+            # Move the compiled 'fn' binary to a location in your system's PATH
+            sudo mv fn /usr/local/bin/
+            ```
+
+    *   **To Verify:** Run `fn --version`. You should see the version number of the CLI you just built.
+
 4.  **jq:** A command-line JSON processor, used for scripting. (`sudo yum install jq` or `sudo apt-get install jq`).
 5.  **OCI Resources:**
     *   A running PostgreSQL database with the `pgvector` extension.
