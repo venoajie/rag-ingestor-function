@@ -124,6 +124,7 @@ This is the most critical configuration step. It ensures your local CLI tools ca
     # Get your OCI Auth Token from your user profile in the OCI Console.
     # This is more secure than passing the password directly on the command line.
     echo "<YOUR_AUTH_TOKEN>" | docker login <region-key>.ocir.io -u <tenancy-namespace>/<your-oci-username> --password-stdin
+    echo "wD***V]" | docker login fra.ocir.io -u fr**es/vxx.xx@xx.com --password-stdin
     ```
 
 2.  **Create and Configure the Fn CLI Context:**
