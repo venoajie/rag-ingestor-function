@@ -1,7 +1,7 @@
 
 # --- Stage 1: The "Builder" Stage ---
 # Use a modern, stable Python version.
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /packages
 COPY requirements.txt .
@@ -13,9 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt -t .
 FROM python:3.11-slim
 
 WORKDIR /function
-
-# BEST PRACTICE: With psycopg (v3), we no longer need to install libpq5 via apt-get.
-# This makes the image smaller and the build faster and more reliable.
 
 # Copy the pre-installed packages from the "builder" stage.
 COPY --from=builder /packages /function
