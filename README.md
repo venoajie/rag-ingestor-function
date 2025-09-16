@@ -123,8 +123,8 @@ This is the most critical configuration step. It ensures your local CLI tools ca
     ```bash
     # Get your OCI Auth Token from your user profile in the OCI Console.
     # This is more secure than passing the password directly on the command line.
-    echo "<YOUR_AUTH_TOKEN>" | docker login <region-key>.ocir.io -u <tenancy-namespace>/<your-oci-username> --password-stdin
-    echo "wD***V]" | docker login fra.ocir.io -u fr**es/vxx.xx@xx.com --password-stdin
+    # Example: echo "<YOUR_AUTH_TOKEN>" | docker login fra.ocir.io -u <tenancy-namespace>/<your-oci-username> --password-stdin
+    echo "<YOUR_AUTH_TOKEN>" | docker login <your-region-key>.ocir.io -u <your-tenancy-namespace>/<your-oci-username> --password-stdin
     ```
 
 2.  **Create and Configure the Fn CLI Context:**
@@ -139,9 +139,9 @@ This is the most critical configuration step. It ensures your local CLI tools ca
 
     # 2.3. Configure the context with your specific OCI details
     # Replace placeholders accordingly.
-    fn update context oracle.compartment-id <YOUR_COMPARTMENT_OCID>
-    fn update context api-url https://functions.<your-region>.oci.oraclecloud.com
-    fn update context registry <your-region-key>.ocir.io/<your_tenancy_namespace>
+    fn update context oracle.compartment-id "<YOUR_COMPARTMENT_OCID>"
+    fn update context api-url "https://functions.<your-region>.oci.oraclecloud.com"
+    fn update context registry "<your-region-key>.ocir.io/<your_tenancy_namespace>"
 
     # 2.4. Verify the context is fully configured
     echo "✅ Verifying Fn context..."
