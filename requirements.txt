@@ -1,5 +1,6 @@
-fdk==0.1.60
-oci==2.125.0
-sqlalchemy==2.0.43
+
+fdk>=0.1.60
+oci>=2.125.0
+sqlalchemy>=2.0.29
 psycopg>=3.1.18
-pgvector==0.4.1
+pgvector>=0.2.4
