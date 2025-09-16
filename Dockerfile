@@ -1,6 +1,7 @@
+
 # --- Stage 1: The "Builder" Stage ---
-# Use a more modern Python version. 3.11 is a good, stable choice.
-FROM python:3.11 as builder
+# Use a modern, stable Python version.
+FROM python:3.11-slim as builder
 
 WORKDIR /packages
 COPY requirements.txt .
@@ -8,14 +9,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -t .
 
 # --- Stage 2: The Final "Runtime" Stage ---
+# We can use the same slim base image.
 FROM python:3.11-slim
 
 WORKDIR /function
 
-# Install the runtime OS dependency for psycopg2.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
-    && rm -rf /var/lib/apt/lists/*
+# BEST PRACTICE: With psycopg (v3), we no longer need to install libpq5 via apt-get.
+# This makes the image smaller and the build faster and more reliable.
 
 # Copy the pre-installed packages from the "builder" stage.
 COPY --from=builder /packages /function
