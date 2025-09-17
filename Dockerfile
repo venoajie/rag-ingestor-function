@@ -1,48 +1,45 @@
 
-# --- Stage 1: Base with UV and a Virtual Environment ---
-# Use a modern, stable Python version.
-FROM python:3.11-slim AS base
+# Stage 1: A minimal stage that provides the 'uv' binary for the target architecture.
+FROM ghcr.io/astral-sh/uv:latest AS uv
 
-# Create a non-root user for better security, similar to the Librarian.
-# The FDK runtime will use this user.
-RUN useradd --create-home --shell /bin/bash appuser
+# Stage 2: The Builder stage, using a standard Python base image.
+FROM python:3.11-slim AS builder
 
-# Set up the virtual environment using uv.
-ENV UV_VENV=/opt/venv
-RUN python -m pip install --no-cache-dir uv \
-    && python -m uv venv ${UV_VENV} --python python3.11 \
-    && chown -R appuser:appuser ${UV_VENV}
-
-# --- Stage 2: Builder - Install Dependencies ---
-# This stage installs the Python packages into the virtual environment.
-FROM base AS builder
-
-# Activate the virtual environment for subsequent commands.
-ENV PATH="${UV_VENV}/bin:$PATH"
+# BEST PRACTICE: Enable bytecode compilation for faster cold starts.
+ENV UV_COMPILE_BYTECODE=1
+# BEST PRACTICE: Create a deterministic layer by disabling installer metadata.
+ENV UV_NO_INSTALLER_METADATA=1
 
 WORKDIR /function
+
 COPY requirements.txt .
 
-# Use uv to install dependencies into the virtual environment created in the base stage.
-RUN uv pip install --no-cache-dir -r requirements.txt
+# CRITICAL FIX: Mount the native 'uv' binary from the 'uv' stage and use it.
+# This avoids the QEMU segmentation fault.
+# We also mount a cache directory to speed up subsequent builds.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=from=uv,source=/uv,target=/bin/uv \
+    uv pip install --no-cache-dir -r requirements.txt -t .
 
-# --- Stage 3: Runtime - The Final, Lean Image ---
-FROM base AS runtime
+# Stage 3: The Runtime stage, the final lean image.
+FROM python:3.11-slim
 
 WORKDIR /function
 
-# Copy the populated virtual environment from the builder stage.
-COPY --from=builder ${UV_VENV} ${UV_VENV}
+# Create a non-root user for security.
+RUN useradd --create-home --shell /bin/bash appuser
 
-# Copy your function's source code.
+# Copy the pre-installed and pre-compiled dependencies from the builder stage.
+COPY --from=builder /function .
+
+# Copy the function's source code.
 COPY func.py .
 
-# Set ownership for the function code.
+# Set ownership for all function files.
 RUN chown -R appuser:appuser /function
 
 # Switch to the non-root user.
 USER appuser
 
-# This is the standard, required entrypoint for the Python FDK.
-# It uses the Python executable from WITHIN the virtual environment.
-ENTRYPOINT ["/opt/venv/bin/python", "-m", "fdk", "func.py", "handler"]
+# The standard, required entrypoint for the Python FDK.
+ENTRYPOINT ["/usr/local/bin/python", "-m", "fdk", "func.py", "handler"]
