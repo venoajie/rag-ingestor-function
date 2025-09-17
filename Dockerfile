@@ -1,7 +1,7 @@
 
 # --- Stage 1: The Builder Stage ---
 # This stage creates the virtual environment and installs dependencies into it.
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim AS builder
 
 # Create the virtual environment.
 RUN python -m venv /opt/venv
@@ -12,7 +12,7 @@ RUN . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
 
 # --- Stage 2: The Runtime Stage ---
 # This is the final, lean image.
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /function
 
@@ -26,9 +26,7 @@ COPY --from=builder /opt/venv /opt/venv
 COPY func.py .
 
 # --- COLD START OPTIMIZATION ---
-# Pre-compile all Python files (.py) in the virtual environment and our
-# own function code (.pyc files). This significantly speeds up cold starts.
-# The '-j 0' flag uses all available CPU cores for compilation.
+# Pre-compile all Python files to bytecode.
 RUN /opt/venv/bin/python -m compileall -j 0 /opt/venv /function
 
 # Set ownership for all function files.
