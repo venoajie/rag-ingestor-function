@@ -68,6 +68,8 @@ def _download_and_parse_payload(bucket_name: str, object_name: str) -> dict:
     """Downloads the object from OCI storage, decompresses it, and parses the JSON payload."""
     signer = oci.auth.signers.get_resource_principals_signer()
     object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
+    
+    #namespace = object_storage_client.get_namespace().data
 
     # Read the namespace from a configuration variable instead of auto-detecting it.
     #why?
