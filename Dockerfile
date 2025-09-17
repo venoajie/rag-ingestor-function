@@ -1,17 +1,17 @@
 
-# Stage 1: The Builder stage, using a standard Python base image.
-# We don't need a separate 'uv' stage if we are using pip.
+# --- Stage 1: The Builder Stage ---
+# This stage creates the virtual environment and installs dependencies into it.
 FROM python:3.11-slim AS builder
 
-WORKDIR /function
+# Create the virtual environment.
+RUN python -m venv /opt/venv
 
+# Activate the venv and install dependencies. This ensures pip is using the venv.
 COPY requirements.txt .
+RUN . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
 
-# Use the standard 'pip install --target' which is what the OCI FDK expects.
-# This installs all packages directly into the current directory.
-RUN pip install --no-cache-dir -r requirements.txt -t .
-
-# Stage 2: The Runtime stage, the final lean image.
+# --- Stage 2: The Runtime Stage ---
+# This is the final, lean image.
 FROM python:3.11-slim
 
 WORKDIR /function
@@ -19,8 +19,8 @@ WORKDIR /function
 # Create a non-root user for security.
 RUN useradd --create-home --shell /bin/bash appuser
 
-# Copy the pre-installed dependencies from the builder stage.
-COPY --from=builder /function .
+# Copy the entire virtual environment from the builder stage.
+COPY --from=builder /opt/venv /opt/venv
 
 # Copy the function's source code.
 COPY func.py .
@@ -32,4 +32,5 @@ RUN chown -R appuser:appuser /function
 USER appuser
 
 # The standard, required entrypoint for the Python FDK.
-ENTRYPOINT ["/usr/local/bin/python", "-m", "fdk", "func.py", "handler"]
+# CRITICAL: It now uses the Python executable from WITHIN the virtual environment.
+ENTRYPOINT ["/opt/venv/bin/python", "-m", "fdk", "func.py", "handler"]
