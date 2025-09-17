@@ -1,27 +1,17 @@
 
-# Stage 1: A minimal stage that provides the 'uv' binary for the target architecture.
-FROM ghcr.io/astral-sh/uv:latest AS uv
-
-# Stage 2: The Builder stage, using a standard Python base image.
+# Stage 1: The Builder stage, using a standard Python base image.
+# We don't need a separate 'uv' stage if we are using pip.
 FROM python:3.11-slim AS builder
-
-# BEST PRACTICE: Enable bytecode compilation for faster cold starts.
-ENV UV_COMPILE_BYTECODE=1
-# BEST PRACTICE: Create a deterministic layer by disabling installer metadata.
-ENV UV_NO_INSTALLER_METADATA=1
 
 WORKDIR /function
 
 COPY requirements.txt .
 
-# CRITICAL FIX: Mount the native 'uv' binary from the 'uv' stage and use it.
-# This avoids the QEMU segmentation fault.
-# We also mount a cache directory to speed up subsequent builds.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=from=uv,source=/uv,target=/bin/uv \
-    uv pip install --no-cache-dir -r requirements.txt -t .
+# Use the standard 'pip install --target' which is what the OCI FDK expects.
+# This installs all packages directly into the current directory.
+RUN pip install --no-cache-dir -r requirements.txt -t .
 
-# Stage 3: The Runtime stage, the final lean image.
+# Stage 2: The Runtime stage, the final lean image.
 FROM python:3.11-slim
 
 WORKDIR /function
@@ -29,7 +19,7 @@ WORKDIR /function
 # Create a non-root user for security.
 RUN useradd --create-home --shell /bin/bash appuser
 
-# Copy the pre-installed and pre-compiled dependencies from the builder stage.
+# Copy the pre-installed dependencies from the builder stage.
 COPY --from=builder /function .
 
 # Copy the function's source code.
