@@ -68,9 +68,28 @@ def _download_and_parse_payload(bucket_name: str, object_name: str) -> dict:
     """Downloads the object from OCI storage, decompresses it, and parses the JSON payload."""
     signer = oci.auth.signers.get_resource_principals_signer()
     object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
-    namespace = object_storage_client.get_namespace().data
+
+    # Read the namespace from a configuration variable instead of auto-detecting it.
+    #why?
+    #There is a known edge case: if the user identity associated with the Resource Principal (the function itself) has a default compartment set to something *other* than the root, the `get_namespace()` call can sometimes behave unexpectedly or be affected by tenancy-level policies.
     
-    logger.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'...")
+    #The error message is a permissions error disguised as a "not found" error. The function has permission to `manage objects`, but it might be failing at the `get_namespace` step before it even tries to get the object.
+    
+    # Additional deployment step:
+    #### Add the Namespace to the Function's Configuration**
+    # Now we need to tell the function what its namespace is. 
+    # --- Configuration ---
+    #export APP_NAME="rag-ecosystem-app"
+    # This is your Object Storage namespace from the error log
+    #export OCI_NAMESPACE="frpowqeyehes" 
+    
+    #fn config function $APP_NAME rag-ingestor OCI_NAMESPACE "$OCI_NAMESPACE"
+
+    namespace = os.environ.get("OCI_NAMESPACE")
+    if not namespace:
+        raise ValueError("CRITICAL: OCI_NAMESPACE environment variable not set.")
+        
+    logger.info(f"Downloading object '{object_name}' from bucket '{bucket_name}' in namespace '{namespace}'...")
     get_obj = object_storage_client.get_object(namespace, bucket_name, object_name)
 
     with gzip.GzipFile(fileobj=io.BytesIO(get_obj.data.content), mode='rb') as gz_file:
@@ -78,7 +97,7 @@ def _download_and_parse_payload(bucket_name: str, object_name: str) -> dict:
     
     logger.info("Successfully downloaded and parsed payload.")
     return payload
-
+    
 def _process_database_transaction(engine, payload: dict):
     """
     Handles the core database logic within a single, atomic transaction.
@@ -130,7 +149,7 @@ def _process_database_transaction(engine, payload: dict):
                         VALUES (:id, :content, :metadata, :embedding)
                     """)
                     
-                    # CRITICAL FIX: Map the incoming 'document' key to the 'content' database column.
+                    # Map the incoming 'document' key to the 'content' database column.
                     records_to_insert = [
                         {
                             "id": chunk.get("id"),
@@ -168,6 +187,6 @@ def handler(ctx, data: io.BytesIO = None):
         return {"status": "success", "message": f"Processed {object_name} successfully."}
     except Exception as e:
         logger.error(f"An unhandled error occurred in the handler: {e}", exc_info=True)
-        # OPERATIONAL FIX: Re-raise the exception to mark the function invocation as failed.
+        # Re-raise the exception to mark the function invocation as failed.
         # This is crucial for OCI monitoring and the built-in retry mechanism.
         raise
