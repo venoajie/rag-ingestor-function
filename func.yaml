@@ -1,11 +1,7 @@
 
 schema_version: 20180708
 name: rag-ingestor
-version: 1.0.4 # Bump the version to reflect the changes
+version: 1.1.0 # Bumping to a minor version for this significant build process change
 runtime: docker
 memory: 512
 timeout: 120
-# Force the build to target the correct architecture for the OCI Functions runtime.
-platform: linux/amd64
-# BEST PRACTICE: Use 'cmd' which is the standard for 'runtime: docker'
-cmd: python func.py handler
