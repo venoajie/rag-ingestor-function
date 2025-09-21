@@ -54,9 +54,13 @@ def _download_and_parse_payload(bucket_name: str, object_name: str) -> dict:
     signer = oci.auth.signers.get_resource_principals_signer()
     object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
     
-    # THIS IS THE CORRECT CODE: Let the SDK auto-discover the namespace.
-    namespace = object_storage_client.get_namespace().data
-
+    # Hard-code the namespace from an environment variable for maximum reliability.
+    namespace = os.environ.get("OCI_NAMESPACE")
+    if not namespace:
+        # Fallback for safety, but the env var should be set.
+        logger.warning("OCI_NAMESPACE not set, falling back to auto-discovery.")
+        namespace = object_storage_client.get_namespace().data
+        
     logger.info(f"Downloading object '{object_name}' from bucket '{bucket_name}' in namespace '{namespace}'...")
     get_obj = object_storage_client.get_object(namespace, bucket_name, object_name)
 
