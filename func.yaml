@@ -1,7 +1,7 @@
 
 schema_version: 20180708
 name: rag-ingestor
-version: 2.0.0
+version: 2.0.1
 runtime: docker
 memory: 512
 timeout: 120
