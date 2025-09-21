@@ -1,112 +1,64 @@
-# Serverless RAG Ingestion Function on OCI
+# RAG Ingestion Function - Deployment Guide v2.1
 
-This repository contains the source code and deployment instructions for the RAG Ingestion Function, a critical component of the three-tiered RAG ecosystem on Oracle Cloud Infrastructure (OCI).
+This repository contains the source code and deployment instructions for the RAG Ingestion Function, a critical component of the three-tiered RAG ecosystem on Oracle Cloud Infrastructure (OCI). This guide has been updated with battle-tested commands and procedures to ensure a robust and repeatable deployment.
 
 ## 1. Overview
 
-This is a serverless, event-driven OCI Function responsible for securely and efficiently loading indexed codebase data into a central PostgreSQL database. It is designed to be the "Ingestor" component, triggered automatically when the "Producer" (a CI/CD workflow) uploads a new data file to an OCI Object Storage bucket.
+This is a serverless, event-driven OCI Function responsible for securely and efficiently loading indexed codebase data into a central PostgreSQL database.
 
 ### Architecture Flow
 ```
 +------------------+      +----------------------+      +--------------------+      +------------------+
-|                  |      |                      |      |                    |      |                  |
-|  GitHub Actions  |----->| OCI Object Storage   |----->| OCI Function       |----->|   PostgreSQL     |
-|  (CI/CD Producer)|      | (rag-codebase-inbox) |      | (This Function)    |      |   Database       |
-|                  |      |                      |      |                    |      |                  |
+| GitHub Actions   |----->| OCI Object Storage   |----->| OCI Function       |----->| PostgreSQL DB    |
+| (CI/CD Producer) |      | (rag-codebase-inbox) |      | (This Function)    |      | (Central DB)     |
 +------------------+      +----------------------+      +--------------------+      +------------------+
 ```
 
 ## 2. Prerequisites
 
-Before you begin, ensure you have the following tools installed and configured:
+Ensure you have the following tools installed and configured:
+1.  **OCI CLI:** Installed and configured (`oci setup config`).
+2.  **Docker:** Installed and running.
+3.  **Fn Project CLI:** Installed (preferably built from source).
+4.  **jq:** A command-line JSON processor (`sudo dnf install -y jq`).
 
-1.  **OCI CLI:** Installed and configured with a user profile (`~/.oci/config`).
-2.  **Docker:** Installed, running, and able to execute commands.
-3.  **Fn Project CLI:** The Fn Project CLI is required to interact with the OCI Functions service. The most reliable way to ensure compatibility is to build it from source. This guide requires Go 1.21 or newer.
-
-    *   **Installation Steps:**
-
-        1.  **Install Go (Golang):**
-            *   Check if Go is installed by running `go version`. If it's 1.21+ you can skip this step.
-            *   To install Go for your architecture (example for ARM64):
-                ```bash
-                # Download the latest Go binary for your architecture
-                wget https://go.dev/dl/go1.22.0.linux-arm64.tar.gz
-
-                # Remove any old Go installation and extract the new one
-                sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.22.0.linux-arm64.tar.gz
-
-                # Add Go to your PATH in your shell configuration file (~/.bashrc, ~/.zshrc, etc.)
-                echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-                source ~/.bashrc
-                ```
-
-        2.  **Build and Install the Fn CLI:**
-            ```bash
-            # Clone the official Fn Project CLI repository
-            git clone https://github.com/fnproject/cli.git fn-cli
-
-            # Navigate into the directory and build the binary
-            cd fn-cli
-            make build
-
-            # Move the compiled 'fn' binary to a location in your system's PATH
-            sudo mv fn /usr/local/bin/
-            ```
-
-    *   **To Verify:** Run `fn --version`. You should see the version number of the CLI you just built.
-
-4.  **jq:** A command-line JSON processor, used for scripting. (`sudo yum install jq` or `sudo apt-get install jq`).
-5.  **OCI Resources:**
-    *   A running PostgreSQL database with the `pgvector` extension.
-    *   The database connection string stored as a Secret in an OCI Vault.
-    *   An OCI user with permissions to manage Functions, IAM, Object Storage, and Events.
+---
 
 ## 3. Step-by-Step Deployment Guide
 
-This guide provides the exact, battle-tested commands to deploy the function from a development instance (like an OCI Compute instance).
+### Phase 0: Environment Setup
 
-### Step 1: Provision OCI Infrastructure
-
-These commands use the OCI CLI to create all necessary cloud resources.
+Execute this block first to set up all necessary variables for your shell session. This will prevent errors in subsequent steps.
 
 ```bash
-# --- Set environment variables for your tenancy ---
+# --- Set these variables with your specific OCI details ---
 export COMPARTMENT_ID="<YOUR_COMPARTMENT_OCID>"
-export SUBNET_ID="<YOUR_SUBNET_ID>"
-export DB_SECRET_OCID="<YOUR_DB_SECRET_OCID>"
-export APP_NAME="rag-app"
+export SUBNET_ID="<YOUR_SUBNET_ID_FOR_THE_FUNCTION>"
+export DB_SECRET_OCID="<YOUR_DB_CONNECTION_STRING_SECRET_OCID>"
+
+# --- These names are defined by the architecture ---
+export APP_NAME="rag-ecosystem-app"
 export BUCKET_NAME="rag-codebase-inbox"
 
+# --- Set these variables for Docker and Fn CLI login ---
+export OCI_REGION="<your_oci_region_e.g.,_eu-frankfurt-1>"
+export OCI_REGION_KEY="<your_oci_region_key_e.g.,_fra>"
+export OCI_TENANCY_NAMESPACE="<your_tenancy_object_storage_namespace>"
+```
+
+### Phase 1: Provision Core Infrastructure
+
+These commands create the bucket and the Functions Application that will host our code.
+
+```bash
 # 1.1. Create the Object Storage "Inbox" Bucket
 echo "Creating Object Storage bucket: $BUCKET_NAME..."
 oci os bucket create \
   --compartment-id $COMPARTMENT_ID \
   --name $BUCKET_NAME \
-  --emit-object-events true
+  --object-events-enabled true
 
-# 1.2. Create the IAM Dynamic Group for the Function
-echo "Creating Dynamic Group..."
-oci iam dynamic-group create \
-  --name "RAGIngestorFunctionDynamicGroup" \
-  --description "Dynamic group for the RAG ingestion function" \
-  --matching-rule "ALL {resource.type = 'fnfunc', resource.compartment.id = '$COMPARTMENT_ID', resource.freeformTags.appName = '$APP_NAME'}"
-
-# 1.3. Create the IAM Policy
-echo "Creating IAM Policy..."
-oci iam policy create \
-  --compartment-id $COMPARTMENT_ID \
-  --name "RAGIngestorFunctionPolicy" \
-  --description "Grants RAG Ingestor function necessary permissions" \
-  --statements "[
-    \"Allow dynamic-group RAGIngestorFunctionDynamicGroup to read objects in compartment id $COMPARTMENT_ID where target.bucket.name = '$BUCKET_NAME'\",
-    \"Allow dynamic-group RAGIngestorFunctionDynamicGroup to read secret-bundles in compartment id $COMPARTMENT_ID where target.secret.id = '$DB_SECRET_OCID'\",
-    \"Allow dynamic-group RAGIngestorFunctionDynamicGroup to use vnics in compartment id $COMPARTMENT_ID\",
-    \"Allow dynamic-group RAGIngestorFunctionDynamicGroup to use subnets in compartment id $COMPARTMENT_ID\",
-    \"Allow dynamic-group RAGIngestorFunctionDynamicGroup to use network-security-groups in compartment id $COMPARTMENT_ID\"
-  ]"
-
-# 1.4. Create the OCI Function Application
+# 1.2. Create the OCI Function Application
 echo "Creating Functions Application: $APP_NAME..."
 oci fn application create \
   --compartment-id $COMPARTMENT_ID \
@@ -115,116 +67,177 @@ oci fn application create \
   --freeform-tags "{\"appName\": \"$APP_NAME\"}"
 ```
 
-### Step 2: Configure Local Tooling
+### Phase 2: Configure Permissions & Networking
 
-This is the most critical configuration step. It ensures your local CLI tools can communicate correctly with OCI.
-
-1.  **Log in to OCI Container Registry (OCIR):**
-    ```bash
-    # Get your OCI Auth Token from your user profile in the OCI Console.
-    # This is more secure than passing the password directly on the command line.
-    # Example: echo "<YOUR_AUTH_TOKEN>" | docker login fra.ocir.io -u <tenancy-namespace>/<your-oci-username> --password-stdin
-    echo "<YOUR_AUTH_TOKEN>" | docker login <your-region-key>.ocir.io -u <your-tenancy-namespace>/<your-oci-username> --password-stdin
-    ```
-
-2.  **Create and Configure the Fn CLI Context:**
-    The `fn` CLI needs a context with the `oracle` provider to authenticate correctly.
-
-    ```bash
-    # 2.1. Create a new context with the 'oracle' provider
-    fn create context oci-prod --provider oracle
-
-    # 2.2. Switch to the new context
-    fn use context oci-prod
-
-    # 2.3. Configure the context with your specific OCI details
-    # Replace placeholders accordingly.
-    fn update context oracle.compartment-id "<YOUR_COMPARTMENT_OCID>"
-    fn update context api-url "https://functions.<your-region>.oci.oraclecloud.com"
-    fn update context registry "<your-region-key>.ocir.io/<your_tenancy_namespace>"
-
-    # 2.4. Verify the context is fully configured
-    echo "✅ Verifying Fn context..."
-    fn list contexts
-    # Ensure the line for 'oci-prod' has the PROVIDER, API URL, and REGISTRY fields populated.
-    ```
-
-### Step 3: Build, Push, and Deploy the Function
-
-Navigate into this repository's directory before running these commands.
+This is the most critical phase. These policies and rules grant all necessary permissions for the system to operate.
 
 ```bash
-# 1. Build the function's container image.
-# This reads func.yaml and builds the image with the correct tag.
-fn build
+# 2.1. Create the IAM Dynamic Group for the Function
+echo "Creating Dynamic Group..."
+oci iam dynamic-group create \
+  --name "RAGIngestorFunctionDynamicGroup" \
+  --description "Dynamic group for the RAG ingestion function" \
+  --matching-rule "ALL {resource.type = 'fnfunc', resource.compartment.id = '$COMPARTMENT_ID', resource.freeformTags.appName = '$APP_NAME'}"
 
-# 2. Push the image to the OCI Container Registry.
-fn push
+# 2.2. Create the Function's Own Permissions Policy
+# This allows the function to read secrets/objects and use the network.
+printf '[
+  "Allow dynamic-group RAGIngestorFunctionDynamicGroup to read secret-bundles in compartment id %s where target.secret.id = ''%s''",
+  "Allow dynamic-group RAGIngestorFunctionDynamicGroup to read objects in compartment id %s where target.bucket.name = ''%s''",
+  "Allow dynamic-group RAGIngestorFunctionDynamicGroup to use virtual-network-family in compartment id %s"
+]' "${COMPARTMENT_ID}" "${DB_SECRET_OCID}" "${COMPARTMENT_ID}" "${BUCKET_NAME}" "${COMPARTMENT_ID}" > /tmp/statements.json
 
-# 3. Deploy the function to your application in OCI.
-fn deploy --app rag-ecosystem-app
+oci iam policy create \
+  --compartment-id "${COMPARTMENT_ID}" \
+  --name "RAGIngestorFunctionPermissionsPolicy" \
+  --description "Grants RAG Ingestor function permissions to read secrets, objects, and use the VCN." \
+  --statements file:///tmp/statements.json
+
+# 2.3. Create the Event Service Invocation Policy
+# This allows the OCI Events service to invoke your function.
+printf '["Allow service events to use fn-function in compartment id %s"]' "${COMPARTMENT_ID}" > /tmp/statements.json
+
+oci iam policy create \
+  --compartment-id "${COMPARTMENT_ID}" \
+  --name "AllowEventsToInvokeFunctionsPolicy" \
+  --description "Allows the OCI Events service to invoke functions within this compartment." \
+  --statements file:///tmp/statements.json
+
+rm /tmp/statements.json
 ```
 
-### Step 4: Post-Deployment Configuration
+**2.4. Configure VCN Security List for Ingress**
 
-The function is deployed but needs its database credentials and the event trigger to become operational.
+The function's subnet needs a rule to allow incoming traffic from OCI services.
+1.  In the OCI Console, navigate to your VCN, then to the **Security List** for your function's subnet.
+2.  Click **Add Ingress Rules**.
+3.  Create a **Stateful** rule with these values:
+    *   **Source Type:** `Service`
+    *   **Source Service:** `All <region-key> Services in Oracle Services Network` (e.g., `All FRA Services...`)
+    *   **IP Protocol:** `TCP`
+    *   **Destination Port Range:** `443`
+    *   **Description:** `Allow OCI services to invoke Functions`
 
-1.  **Configure the Function with the Database Secret:**
-    ```bash
-    fn config function rag-ecosystem-app rag-ingestor DB_SECRET_OCID "<YOUR_DB_SECRET_OCID>"
-    ```
+### Phase 3: Prepare and Fix the Function Code
 
-2.  **Create the Event Rule (The Trigger):**
-    This process uses a temporary file to avoid shell quoting issues, which is the most robust method.
+```bash
+# 3.1. Clone the repository
+cd /srv/apps # Or your preferred location
+git clone <YOUR_FUNCTION_REPO_URL> rag-ingestor-function
+cd rag-ingestor-function
 
-    ```bash
-    # 2.1. Get the function's OCID and strip the extra quotes from the CLI's output.
-    FUNCTION_ID=$(fn inspect function rag-ecosystem-app rag-ingestor id | tr -d '"')
-    echo "Captured Function ID: $FUNCTION_ID"
+# 3.2. [CRITICAL] Fix file permissions if you used 'sudo git clone'
+sudo chown -R $USER:$USER .
 
-    # 2.2. Create a perfectly formatted JSON file for the --actions parameter.
-    printf '{"actions":[{"actionType":"FAAS","functionId":"%s","isEnabled":true}]}' "$FUNCTION_ID" > actions.json
-    echo "✅ Created actions.json file:"
-    cat actions.json
+# 3.3. [CRITICAL] Apply code fix for namespace discovery
+# This makes the namespace lookup robust by using an environment variable.
+# Replace the line `namespace = object_storage_client.get_namespace().data` in func.py
+# with the following block:
+#
+#     namespace = os.environ.get("OCI_NAMESPACE")
+#     if not namespace:
+#         logger.critical("FATAL: OCI_NAMESPACE environment variable is not set.")
+#         raise ValueError("OCI_NAMESPACE environment variable is not set.")
+#
+```
 
-    # 2.3. Create the event rule by referencing the JSON file.
-    oci events rule create \
-      --display-name "TriggerRAGIngestorOnNewCodebaseFile" \
-      --is-enabled true \
-      --compartment-id "<YOUR_COMPARTMENT_OCID>" \
-      --condition '{
-        "eventType": "com.oraclecloud.objectstorage.createobject",
-        "data": {
-          "additionalDetails": {
-            "bucketName": "rag-codebase-inbox"
-          },
-          "resourceName.suffix": ".json.gz"
-        }
-      }' \
-      --actions file://actions.json
+### Phase 4: Deploy and Configure the Function
 
-    # 2.4. Clean up the temporary file.
-    rm actions.json
-    ```
+```bash
+# 4.1. Log in to OCI Container Registry (OCIR)
+# Get an Auth Token from your OCI user profile page.
+echo "<YOUR_AUTH_TOKEN>" | docker login ${OCI_REGION_KEY}.ocir.io -u ${OCI_TENANCY_NAMESPACE}/<your-oci-username> --password-stdin
+
+# 4.2. Configure the Fn CLI Context
+fn create context oci-prod --provider oracle
+fn use context oci-prod
+fn update context oracle.compartment-id "${COMPARTMENT_ID}"
+fn update context api-url "https://functions.${OCI_REGION}.oci.oraclecloud.com"
+fn update context registry "${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}"
+fn list contexts # Verify 'oci-prod' is current and configured
+
+# 4.3. Deploy the function
+fn deploy --app ${APP_NAME}
+
+# 4.4. Configure the function with its required environment variables
+fn config function ${APP_NAME} rag-ingestor DB_SECRET_OCID "${DB_SECRET_OCID}"
+fn config function ${APP_NAME} rag-ingestor OCI_NAMESPACE "${OCI_TENANCY_NAMESPACE}"
+```
+
+### Phase 5: Create the Event Rule Trigger
+
+Using the UI is the most reliable method for this step.
+1.  In the OCI Console, navigate to **Observability & Management -> Events Service -> Rules**.
+2.  Click **Create Rule**.
+3.  **Rule Conditions:**
+    *   **Condition:** `Event Type`
+    *   **Service Name:** `Object Storage`
+    *   **Event Type:** `Object - Create`
+    *   **Attribute:** `bucketName` = `rag-codebase-inbox`
+4.  **Actions:**
+    *   **Action Type:** `Functions`
+    *   Select your `RAG-Project` compartment, `rag-ecosystem-app` application, and `rag-ingestor` function.
+5.  Click **Create Rule**.
 
 **Deployment is now complete and the system is LIVE.**
 
-## 4. Operations and Maintenance
+---
 
-### Testing the Pipeline
+## 4. Operations and Troubleshooting
 
-To perform a full end-to-end test:
-1.  Create a test file: `echo '[{"source": "test.py", "chunk_text": "test", "embedding": [0.1]}]' | gzip > test.json.gz`
-2.  Upload it to the bucket: `oci os object put --bucket-name rag-codebase-inbox --file test.json.gz --name "manual-test.json.gz"`
-3.  Monitor the logs in the OCI Console and verify the data appears in your database.
+### End-to-End Test
 
-### Monitoring
+1.  **On your database host (`prod` server):** Create a test table.
+    ```bash
+    docker exec postgres-db psql -U platform_admin -d librarian_db -c "CREATE TABLE IF NOT EXISTS test_collection (id TEXT PRIMARY KEY, content TEXT, metadata JSONB, embedding vector(3));"
+    ```
+2.  **On your deployment host (`dev` server):** Create and upload a test file.
+    ```bash
+    echo '{"table_name": "test_collection", "chunks_to_upsert": [{"id": "test-id-123", "document": "def test(): pass", "metadata": {"source": "test.py"}, "embedding": [0.1,0.2,0.3]}]}' | gzip > /tmp/test.json.gz
+    oci os object put --bucket-name ${BUCKET_NAME} --file /tmp/test.json.gz --name "manual-test.json.gz"
+    ```
+3.  **On your database host (`prod` server):** Wait 30 seconds, then verify the data.
+    ```bash
+    sleep 30
+    docker exec postgres-db psql -U librarian_user -d librarian_db -c "SELECT * FROM test_collection;"
+    ```
 
-All function logs are available in the OCI Console under **Observability & Management -> Logging -> Logs**.
+### **Proactive Troubleshooting: The Diagnostic Flow**
 
-### Updating the Function
+If the end-to-end test fails, **do not guess**. Follow this diagnostic flow immediately after uploading a test file.
 
-To deploy a new version of the function:
-1.  Make your code changes in `func.py`.
-2.  Update the version number in `func.yaml` (e.g., to `0.0.2`).
-3.  Run `fn deploy --app rag-ecosystem-app`. This single command will automatically handle the build, push, and update process.
+**Step 1: Check the Function Logs (The Function's Story)**
+
+This is your primary source of truth.
+1.  Go to OCI Console -> **Developer Services** -> **Functions**.
+2.  Navigate to your application (`rag-ecosystem-app`) and function (`rag-ingestor`).
+3.  Click on **Logs**. Set the time filter to the last 5 minutes.
+
+*   **If you see new logs with a `502` or other error code:**
+    *   The trigger is working, but the function's code is failing.
+    *   Read the error message in the logs. It will contain a Python traceback.
+    *   **`BucketNotFound` error:** The `OCI_NAMESPACE` environment variable is wrong. Fix it with `fn config function ...`.
+    *   **`Authorization failed` or database errors:** The `DB_SECRET_OCID` is wrong, or the database is unreachable.
+    *   **`Timeout` error:** The function cannot reach the database. Check the VCN Security List and Route Tables.
+
+*   **If you see NO new logs at all:**
+    *   The function is **not being invoked**. The problem is the trigger mechanism. Proceed to Step 2.
+
+**Step 2: Check the Audit Logs (The Platform's Story)**
+
+If the function isn't being invoked, the Audit logs will tell you why.
+1.  Go to OCI Console -> **Observability & Management** -> **Audit**.
+2.  Set the time filter to the last 5 minutes.
+3.  Search for events in your compartment (e.g., search for `RAG-Project`).
+4.  Look for an event with the `type` **`com.oraclecloud.function.invokeFunction`** that has a **`status` of `401` or `404` (Not Authorized)**.
+
+*   **If you find a failed `invokeFunction` event:**
+    *   This is an **IAM problem**. The Events service is trying to run the function but is being denied.
+    *   Expand the log's JSON. Look at the `data.identity.principalName`. This will tell you the true name of the service trying to make the call (e.g., `faas`).
+    *   Verify that your `AllowEventsToInvokeFunctionsPolicy` exists and is correct.
+
+*   **If you DO NOT find a failed `invokeFunction` event:**
+    *   This means the Events service isn't even trying. The problem is the **Event Rule** itself.
+    *   Go to **Events Service -> Rules**.
+    *   Verify your rule is **Active**.
+    *   Verify the conditions (Event Type, Service Name, bucketName) are correct. Re-creating the rule via the UI is the most reliable fix.
