@@ -75,7 +75,7 @@ These commands use the OCI CLI to create all necessary cloud resources.
 export COMPARTMENT_ID="<YOUR_COMPARTMENT_OCID>"
 export SUBNET_ID="<YOUR_SUBNET_ID>"
 export DB_SECRET_OCID="<YOUR_DB_SECRET_OCID>"
-export APP_NAME="rag-ecosystem-app"
+export APP_NAME="rag-app"
 export BUCKET_NAME="rag-codebase-inbox"
 
 # 1.1. Create the Object Storage "Inbox" Bucket
