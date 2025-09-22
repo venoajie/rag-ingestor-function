@@ -29,7 +29,7 @@ def _get_db_engine():
             raise ValueError("CRITICAL: DB_SECRET_OCID environment variable not set.")
         logger.info(f"Fetching secret from Vault: {secret_ocid}")
         secret_bundle = secrets_client.get_secret_bundle(secret_id=secret_ocid)
-        db_connection_string = secret_bundle.data.secret_bundle_content.content.decode('utf-8')
+        db_connection_string = secret_bundle.data.secret_bundle_content.content
         db_engine = create_engine(
             db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800
         )
