@@ -27,16 +27,14 @@ def _get_db_engine():
         secret_ocid = os.environ.get("DB_SECRET_OCID")
         if not secret_ocid:
             raise ValueError("CRITICAL: DB_SECRET_OCID environment variable not set.")
+        
         logger.info(f"Fetching secret from Vault: {secret_ocid}")
         secret_bundle = secrets_client.get_secret_bundle(secret_id=secret_ocid)
-        # First, get the raw JSON string from the vault
-        secret_json_string = secret_bundle.data.secret_bundle_content.content
-        # Then, parse the JSON into a Python dictionary
-        secret_data = json.loads(secret_json_string)
-        # Finally, extract the actual connection string from the dictionary
-        # (Assuming the key in your JSON is "connection_string")
-        db_connection_string = secret_data["connection_string"]
+        
+        # Get the raw connection string from the vault and clean any whitespace.
+        db_connection_string = secret_bundle.data.secret_bundle_content.content.strip()
 
+        # Pass the cleaned, raw string directly to create_engine.
         db_engine = create_engine(
             db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800
         )
