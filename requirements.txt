@@ -3,7 +3,7 @@ fdk>=0.1.60
 oci==2.160.2
 sqlalchemy>=2.0.29
 psycopg2-binary>=2.9.9
-pgvector==0.8.1
+pgvector==0.4.1
 python-json-logger
 pydantic==2.11.5
 pydantic-settings==2.3.0
