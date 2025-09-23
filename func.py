@@ -34,6 +34,8 @@ def _get_db_engine():
         # Get the raw connection string from the vault and clean any whitespace.
         db_connection_string = secret_bundle.data.secret_bundle_content.content.strip()
 
+        logger.info(f"Attempting to connect with URL (length {len(db_connection_string)}): '{db_connection_string}'")
+        
         # Pass the cleaned, raw string directly to create_engine.
         db_engine = create_engine(
             db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800
