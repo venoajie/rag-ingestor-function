@@ -18,7 +18,6 @@ from sqlalchemy import create_engine, text, exc
 from sqlalchemy.engine import Engine
 
 # --- 1. Advanced Structured Logging ---
-# Using a custom formatter for more control over exception logging
 class JSONFormatter(logging.Formatter):
     def format(self, record):
         log_record = {
@@ -41,7 +40,6 @@ class JSONFormatter(logging.Formatter):
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-# Remove any default handlers
 if logger.hasHandlers():
     logger.handlers.clear()
 handler = logging.StreamHandler()
@@ -54,31 +52,26 @@ def with_invocation_context(func):
     """Decorator to add invocation context and top-level error handling."""
     @wraps(func)
     def wrapper(ctx, data: io.BytesIO = None):
-        # More robust way to get the invocation ID from headers
         headers = ctx.Headers()
         invocation_id = headers.get("fn-invoke-id") or str(uuid.uuid4())
+        ctx.log = logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
         
-        # Use a LoggerAdapter to automatically inject the invocation_id
-        adapter = logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
-        
-        adapter.info("Function invocation started.")
+        ctx.log.info("Function invocation started.")
         try:
-            # Pass the adapter and invocation_id to the main logic
-            return func(ctx, data, adapter, invocation_id)
+            return func(ctx, data)
         except Exception as e:
-            adapter.critical(
+            ctx.log.critical(
                 f"An unhandled exception reached the top-level wrapper: {e}",
                 exc_info=True
             )
-            # Re-raise to ensure the function fails correctly
             raise
+    return wrapper
             
 # --- 3. Strict Configuration Validation with Pydantic ---
 class ConfigurationError(Exception):
     pass
 
 class DbSecret(pydantic.BaseModel):
-    """Schema for the JSON object stored in OCI Vault."""
     username: str
     password: pydantic.SecretStr
     host: str
@@ -86,20 +79,16 @@ class DbSecret(pydantic.BaseModel):
     dbname: str
 
 class Settings(pydantic_settings.BaseSettings):
-    """Application settings, validated on instantiation."""
     DB_SECRET_OCID: str
     OCI_NAMESPACE: str
-    
     model_config = pydantic_settings.SettingsConfigDict(extra='ignore')
 
-# --- 4. Refactored Core Logic ---
+# --- 4. Core Logic ---
 db_engine: Engine | None = None
 
 def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
     """Initializes a resilient, cached SQLAlchemy engine with retries and timeouts."""
     global db_engine
-    
-    # Stale connection check
     if db_engine is not None:
         try:
             with db_engine.connect() as connection:
@@ -110,7 +99,6 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             log.warning(f"Stale connection detected. Recreating engine. Error: {e}")
             db_engine = None
 
-    # Connection logic with retries
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -132,20 +120,14 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             
             db_engine = create_engine(
                 db_connection_string,
-                pool_pre_ping=True,
-                pool_size=5,
-                max_overflow=10,
-                pool_recycle=1800,
-                # CRITICAL: Add a connection timeout to prevent hangs
+                pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800,
                 connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"}
             )
 
-            # Test connection immediately to fail fast
             with db_engine.connect() as connection:
                 db_version = connection.execute(text("SELECT version()")).scalar()
             log.info("Database engine initialized and connection validated.", extra_info={"db_version": db_version})
             return db_engine
-
         except Exception as e:
             log.error(f"Failed to initialize database engine on attempt {attempt + 1}: {e}", exc_info=True)
             if attempt < max_retries - 1:
@@ -156,18 +138,86 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
                 log.critical("All attempts to initialize database engine failed.")
                 raise
 
-# ... (Your other functions like _download_and_parse_payload and _process_database_transaction remain largely the same, but should accept `log` as an argument to use the contextual logger)
+def _download_and_parse_payload(settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
+    """Downloads, decompresses, and parses the JSON payload from OCI Object Storage."""
+    log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
+    try:
+        signer = oci.auth.signers.get_resource_principals_signer()
+        object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
+        
+        get_obj = object_storage_client.get_object(settings.OCI_NAMESPACE, bucket_name, object_name)
+
+        with gzip.GzipFile(fileobj=io.BytesIO(get_obj.data.content), mode='rb') as gz_file:
+            payload = json.load(gz_file)
+        
+        log.info("Successfully downloaded and parsed payload.")
+        return payload
+    except Exception as e:
+        log.error(f"Failed to download or parse payload for object '{object_name}'.", exc_info=True)
+        raise
+
+def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
+    """Handles the core database logic within a single, atomic transaction."""
+    table_name_raw = payload.get("table_name")
+    chunks_to_upsert = payload.get("chunks_to_upsert", [])
+    files_to_delete = payload.get("files_to_delete", [])
+
+    if not table_name_raw or not re.match(r'^[a-zA-Z0-9_]+$', table_name_raw):
+        raise ValueError(f"Payload provides an invalid or missing 'table_name': {table_name_raw}")
+    table_name = table_name_raw
+
+    log.info(f"Beginning database transaction for table '{table_name}'.", extra_info={
+        "chunks_to_upsert": len(chunks_to_upsert),
+        "files_to_delete": len(files_to_delete)
+    })
+
+    with engine.connect() as connection:
+        with connection.begin() as transaction:
+            try:
+                if files_to_delete:
+                    log.info(f"Deleting {len(files_to_delete)} source files.")
+                    delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_to_delete")
+                    connection.execute(delete_stmt, {"files_to_delete": tuple(files_to_delete)})
+                
+                if chunks_to_upsert:
+                    source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
+                    log.info(f"Upserting data for {len(source_files_to_update)} source files.")
+                    
+                    upsert_delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :source_files")
+                    connection.execute(upsert_delete_stmt, {"source_files": tuple(source_files_to_update)})
+                    
+                    insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
+                    records_to_insert = [
+                        {"id": chunk.get("id"), "content": chunk.get("document"), "metadata": json.dumps(chunk.get("metadata")), "embedding": chunk.get("embedding")}
+                        for chunk in chunks_to_upsert if chunk.get("document")
+                    ]
+                    if records_to_insert:
+                        log.info(f"Inserting {len(records_to_insert)} new chunks.")
+                        connection.execute(insert_stmt, records_to_insert)
+
+                transaction.commit()
+                log.info("Transaction committed successfully.")
+            except exc.SQLAlchemyError as e:
+                log.error("Database transaction failed. Rolling back.", exc_info=True)
+                transaction.rollback()
+                raise
 
 @with_invocation_context
-def handler(ctx, data: io.BytesIO, log: logging.LoggerAdapter, invocation_id: str):
+def handler(ctx, data: io.BytesIO = None):
     """OCI Function entry point."""
+    log = ctx.log
+    
     try:
         # 1. Configuration Validation (Fail Fast)
         log.info("Validating configuration.")
         settings = Settings()
         
         # 2. Event Parsing
-        event = json.loads(data.getvalue().decode('utf-8'))
+        body = data.getvalue()
+        if not body:
+            raise ValueError("Received empty event payload.")
+        event = json.loads(body.decode('utf-8'))
+        
         data = event.get('data', {})
         bucket_name = data.get('additionalDetails', {}).get('bucketName')
         object_name = data.get('resourceName')
@@ -176,11 +226,11 @@ def handler(ctx, data: io.BytesIO, log: logging.LoggerAdapter, invocation_id: st
         log.info("Event parsed successfully.", extra_info={"bucket": bucket_name, "object": object_name})
 
         # 3. Business Logic
-        # payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
-        # _validate_payload(payload, log) # Add payload validation
+        payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
         engine = _get_db_engine(settings, log)
-        # _process_database_transaction(engine, payload, log)
+        _process_database_transaction(engine, payload, log)
         
+        invocation_id = log.extra['invocation_id']
         log.info("Function invocation completed successfully.")
         return {"status": "success", "message": f"Processed {object_name} successfully.", "invocation_id": invocation_id}
 
