@@ -125,7 +125,7 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             db_config = DbSecret.model_validate(db_secret_data)
             
             db_connection_string = (
-                f"postgresql+psycopg2://{db_config.username}:{db_config.password.get_secret_value()}"
+                f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}"
                 f"@{db_config.host}:{db_config.port}/{db_config.dbname}"
             )
             
