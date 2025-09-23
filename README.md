@@ -95,11 +95,12 @@ oci iam policy create \
 
 # 2.3. Create the Event Service Invocation Policy
 # This allows the OCI Events service to invoke your function.
-printf '["Allow service events to use fn-function in compartment id %s"]' "${COMPARTMENT_ID}" > /tmp/statements.json
+printf '["Allow service events to use fn-function in compartment id %s",
+"Allow service FaaS to use virtual-network-family in compartment id %s"]' "${COMPARTMENT_ID}" > /tmp/statements.json
 
 oci iam policy create \
   --compartment-id "${COMPARTMENT_ID}" \
-  --name "AllowEventsToInvokeFunctionsPolicy" \
+  --name "PlatformServicesFunctionPolicy" \
   --description "Allows the OCI Events service to invoke functions within this compartment." \
   --statements file:///tmp/statements.json
 
