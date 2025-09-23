@@ -20,6 +20,7 @@ from sqlalchemy.engine import Engine
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
+        # Start with the standard record attributes
         log_record = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
@@ -27,9 +28,13 @@ class JSONFormatter(logging.Formatter):
             "invocation_id": getattr(record, 'invocation_id', 'N/A'),
             "logger_name": record.name,
         }
-        if hasattr(record, 'extra_info'):
-            log_record.update(record.extra_info)
         
+        # Add any extra fields passed to the logger
+        # This will automatically handle the 'extra' dictionary
+        extra_fields = {k: v for k, v in record.__dict__.items() if k not in logging.LogRecord('', 0, '', 0, '', (), None, None).__dict__}
+        if extra_fields:
+            log_record.update(extra_fields)
+
         if record.exc_info:
             log_record['exception'] = {
                 "type": record.exc_info[0].__name__,
@@ -49,7 +54,6 @@ logger.propagate = False
 
 # --- 2. Context-Aware Logging Decorator ---
 def with_invocation_context(func):
-    """Decorator to add invocation context and top-level error handling."""
     @wraps(func)
     def wrapper(ctx, data: io.BytesIO = None):
         headers = ctx.Headers()
@@ -68,16 +72,13 @@ def with_invocation_context(func):
     return wrapper
             
 # --- 3. Strict Configuration Validation with Pydantic ---
-class ConfigurationError(Exception):
-    pass
-
+class ConfigurationError(Exception): pass
 class DbSecret(pydantic.BaseModel):
     username: str
     password: pydantic.SecretStr
     host: str
     port: int = 5432
     dbname: str
-
 class Settings(pydantic_settings.BaseSettings):
     DB_SECRET_OCID: str
     OCI_NAMESPACE: str
@@ -87,7 +88,6 @@ class Settings(pydantic_settings.BaseSettings):
 db_engine: Engine | None = None
 
 def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
-    """Initializes a resilient, cached SQLAlchemy engine with retries and timeouts."""
     global db_engine
     if db_engine is not None:
         try:
@@ -106,7 +106,7 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             signer = oci.auth.signers.get_resource_principals_signer()
             secrets_client = oci.secrets.SecretsClient(config={}, signer=signer)
             
-            log.info("Fetching secret from Vault.", extra_info={"secret_ocid": settings.DB_SECRET_OCID})
+            log.info("Fetching secret from Vault.", extra={"secret_ocid": settings.DB_SECRET_OCID})
             secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID)
             secret_content = secret_bundle.data.secret_bundle_content.content
             
@@ -126,7 +126,7 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
 
             with db_engine.connect() as connection:
                 db_version = connection.execute(text("SELECT version()")).scalar()
-            log.info("Database engine initialized and connection validated.", extra_info={"db_version": db_version})
+            log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
             return db_engine
         except Exception as e:
             log.error(f"Failed to initialize database engine on attempt {attempt + 1}: {e}", exc_info=True)
@@ -139,17 +139,13 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
                 raise
 
 def _download_and_parse_payload(settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
-    """Downloads, decompresses, and parses the JSON payload from OCI Object Storage."""
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
         signer = oci.auth.signers.get_resource_principals_signer()
         object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
-        
         get_obj = object_storage_client.get_object(settings.OCI_NAMESPACE, bucket_name, object_name)
-
         with gzip.GzipFile(fileobj=io.BytesIO(get_obj.data.content), mode='rb') as gz_file:
             payload = json.load(gz_file)
-        
         log.info("Successfully downloaded and parsed payload.")
         return payload
     except Exception as e:
@@ -157,7 +153,6 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         raise
 
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
-    """Handles the core database logic within a single, atomic transaction."""
     table_name_raw = payload.get("table_name")
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
@@ -166,7 +161,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
         raise ValueError(f"Payload provides an invalid or missing 'table_name': {table_name_raw}")
     table_name = table_name_raw
 
-    log.info(f"Beginning database transaction for table '{table_name}'.", extra_info={
+    log.info(f"Beginning database transaction for table '{table_name}'.", extra={
         "chunks_to_upsert": len(chunks_to_upsert),
         "files_to_delete": len(files_to_delete)
     })
@@ -178,14 +173,11 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_to_delete")
                     connection.execute(delete_stmt, {"files_to_delete": tuple(files_to_delete)})
-                
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
-                    
                     upsert_delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :source_files")
                     connection.execute(upsert_delete_stmt, {"source_files": tuple(source_files_to_update)})
-                    
                     insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
                     records_to_insert = [
                         {"id": chunk.get("id"), "content": chunk.get("document"), "metadata": json.dumps(chunk.get("metadata")), "embedding": chunk.get("embedding")}
@@ -194,7 +186,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     if records_to_insert:
                         log.info(f"Inserting {len(records_to_insert)} new chunks.")
                         connection.execute(insert_stmt, records_to_insert)
-
                 transaction.commit()
                 log.info("Transaction committed successfully.")
             except exc.SQLAlchemyError as e:
@@ -204,15 +195,11 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
 
 @with_invocation_context
 def handler(ctx, data: io.BytesIO = None):
-    """OCI Function entry point."""
     log = ctx.log
-    
     try:
-        # 1. Configuration Validation (Fail Fast)
         log.info("Validating configuration.")
         settings = Settings()
         
-        # 2. Event Parsing
         body = data.getvalue()
         if not body:
             raise ValueError("Received empty event payload.")
@@ -223,9 +210,8 @@ def handler(ctx, data: io.BytesIO = None):
         object_name = data.get('resourceName')
         if not bucket_name or not object_name:
             raise ValueError("Event data is missing bucketName or resourceName.")
-        log.info("Event parsed successfully.", extra_info={"bucket": bucket_name, "object": object_name})
+        log.info("Event parsed successfully.", extra={"bucket": bucket_name, "object": object_name})
 
-        # 3. Business Logic
         payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
         engine = _get_db_engine(settings, log)
         _process_database_transaction(engine, payload, log)
