@@ -107,8 +107,10 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             secrets_client = oci.secrets.SecretsClient(config={}, signer=signer)
             
             log.info("Fetching secret from Vault.", extra={"secret_ocid": settings.DB_SECRET_OCID})
-            secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID)
+            secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
             secret_content = secret_bundle.data.secret_bundle_content.content
+
+            log.info(f"Secret content received from Vault (length: {len(secret_content)}): {secret_content}")        
             
             db_secret_data = json.loads(secret_content)
             db_config = DbSecret.model_validate(db_secret_data)
