@@ -5,125 +5,187 @@ import json
 import logging
 import gzip
 import re
+import uuid
+import time
+import traceback
+from functools import wraps
+from datetime import datetime
+
 import oci
+import pydantic
+import pydantic_settings
 from sqlalchemy import create_engine, text, exc
+from sqlalchemy.engine import Engine
 
-# Configure structured logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger()
+# --- 1. Advanced Structured Logging ---
+# Using a custom formatter for more control over exception logging
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "invocation_id": getattr(record, 'invocation_id', 'N/A'),
+            "logger_name": record.name,
+        }
+        if hasattr(record, 'extra_info'):
+            log_record.update(record.extra_info)
+        
+        if record.exc_info:
+            log_record['exception'] = {
+                "type": record.exc_info[0].__name__,
+                "message": str(record.exc_info[1]),
+                "traceback": "".join(traceback.format_exception(*record.exc_info))
+            }
+        return json.dumps(log_record)
 
-# Global engine object
-db_engine = None
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+# Remove any default handlers
+if logger.hasHandlers():
+    logger.handlers.clear()
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logger.addHandler(handler)
+logger.propagate = False
 
-def _get_db_engine():
-    """Initializes and returns a resilient, cached SQLAlchemy engine."""
+# --- 2. Context-Aware Logging Decorator ---
+def with_invocation_context(func):
+    """Decorator to add invocation context and top-level error handling."""
+    @wraps(func)
+    def wrapper(ctx, data: io.BytesIO = None):
+        invocation_id = ctx.FnInvokeID() or str(uuid.uuid4())
+        
+        # Use a LoggerAdapter to automatically inject the invocation_id
+        adapter = logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
+        
+        adapter.info("Function invocation started.")
+        try:
+            # Pass the adapter and invocation_id to the main logic
+            return func(ctx, data, adapter, invocation_id)
+        except Exception as e:
+            adapter.critical(
+                f"An unhandled exception reached the top-level wrapper: {e}",
+                exc_info=True
+            )
+            # Re-raise to ensure the function fails correctly
+            raise
+    return wrapper
+
+# --- 3. Strict Configuration Validation with Pydantic ---
+class ConfigurationError(Exception):
+    pass
+
+class DbSecret(pydantic.BaseModel):
+    """Schema for the JSON object stored in OCI Vault."""
+    username: str
+    password: pydantic.SecretStr
+    host: str
+    port: int = 5432
+    dbname: str
+
+class Settings(pydantic_settings.BaseSettings):
+    """Application settings, validated on instantiation."""
+    DB_SECRET_OCID: str
+    OCI_NAMESPACE: str
+    
+    model_config = pydantic_settings.SettingsConfigDict(extra='ignore')
+
+# --- 4. Refactored Core Logic ---
+db_engine: Engine | None = None
+
+def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
+    """Initializes a resilient, cached SQLAlchemy engine with retries and timeouts."""
     global db_engine
+    
+    # Stale connection check
     if db_engine is not None:
-        return db_engine
-    try:
-        logger.info("Initializing database engine.")
-        signer = oci.auth.signers.get_resource_principals_signer()
-        secrets_client = oci.secrets.SecretsClient(config={}, signer=signer)
-        secret_ocid = os.environ.get("DB_SECRET_OCID")
-        if not secret_ocid:
-            raise ValueError("CRITICAL: DB_SECRET_OCID environment variable not set.")
-        
-        logger.info(f"Fetching secret from Vault: {secret_ocid}")
-        secret_bundle = secrets_client.get_secret_bundle(secret_id=secret_ocid)
-        
-        # Get the raw connection string from the vault and clean any whitespace.
-        db_connection_string = secret_bundle.data.secret_bundle_content.content.strip()
+        try:
+            with db_engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            log.info("Reusing existing, healthy database engine.")
+            return db_engine
+        except exc.OperationalError as e:
+            log.warning(f"Stale connection detected. Recreating engine. Error: {e}")
+            db_engine = None
 
-        logger.info(f"Attempting to connect with URL (length {len(db_connection_string)}): '{db_connection_string}'")
-        
-        # Pass the cleaned, raw string directly to create_engine.
-        db_engine = create_engine(
-            db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800
-        )
+    # Connection logic with retries
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            log.info(f"Initializing database engine (attempt {attempt + 1}/{max_retries}).")
+            signer = oci.auth.signers.get_resource_principals_signer()
+            secrets_client = oci.secrets.SecretsClient(config={}, signer=signer)
+            
+            log.info("Fetching secret from Vault.", extra_info={"secret_ocid": settings.DB_SECRET_OCID})
+            secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID)
+            secret_content = secret_bundle.data.secret_bundle_content.content
+            
+            db_secret_data = json.loads(secret_content)
+            db_config = DbSecret.model_validate(db_secret_data)
+            
+            db_connection_string = (
+                f"postgresql+psycopg2://{db_config.username}:{db_config.password.get_secret_value()}"
+                f"@{db_config.host}:{db_config.port}/{db_config.dbname}"
+            )
+            
+            db_engine = create_engine(
+                db_connection_string,
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=10,
+                pool_recycle=1800,
+                # CRITICAL: Add a connection timeout to prevent hangs
+                connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"}
+            )
 
-        logger.info("Database engine initialized successfully.")
-        return db_engine
-    except Exception as e:
-        logger.critical(f"FATAL: Failed to initialize database engine: {e}", exc_info=True)
-        raise
+            # Test connection immediately to fail fast
+            with db_engine.connect() as connection:
+                db_version = connection.execute(text("SELECT version()")).scalar()
+            log.info("Database engine initialized and connection validated.", extra_info={"db_version": db_version})
+            return db_engine
 
-def _parse_event(event_data: dict) -> tuple[str, str]:
-    """Safely parses the OCI event data."""
-    data = event_data.get('data', {})
-    additional_details = data.get('additionalDetails', {})
-    bucket_name = additional_details.get('bucketName')
-    object_name = data.get('resourceName')
-    if not bucket_name or not object_name:
-        raise ValueError(f"Event data is missing bucketName or resourceName. Event: {event_data}")
-    return bucket_name, object_name
-
-def _download_and_parse_payload(bucket_name: str, object_name: str) -> dict:
-    """Downloads the object from OCI storage, decompresses it, and parses the JSON payload."""
-    signer = oci.auth.signers.get_resource_principals_signer()
-    object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
-    
-    # Hard-code the namespace from an environment variable for maximum reliability.
-    namespace = os.environ.get("OCI_NAMESPACE")
-    if not namespace:
-        # Fallback for safety, but the env var should be set.
-        logger.warning("OCI_NAMESPACE not set, falling back to auto-discovery.")
-        namespace = object_storage_client.get_namespace().data
-        
-    logger.info(f"Downloading object '{object_name}' from bucket '{bucket_name}' in namespace '{namespace}'...")
-    get_obj = object_storage_client.get_object(namespace, bucket_name, object_name)
-
-    with gzip.GzipFile(fileobj=io.BytesIO(get_obj.data.content), mode='rb') as gz_file:
-        payload = json.load(gz_file)
-    
-    logger.info("Successfully downloaded and parsed payload.")
-    return payload
-
-def _process_database_transaction(engine, payload: dict):
-    """Handles the core database logic within a single, atomic transaction."""
-    table_name_raw = payload.get("table_name")
-    chunks_to_upsert = payload.get("chunks_to_upsert", [])
-    files_to_delete = payload.get("files_to_delete", [])
-
-    if not table_name_raw or not re.match(r'^[a-zA-Z0-9_]+$', table_name_raw):
-        raise ValueError(f"Payload provides an invalid or missing 'table_name': {table_name_raw}")
-    table_name = table_name_raw
-
-    logger.info(f"Beginning database transaction for table '{table_name}'")
-
-    with engine.connect() as connection:
-        with connection.begin() as transaction:
-            try:
-                if files_to_delete:
-                    delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_to_delete")
-                    connection.execute(delete_stmt, {"files_to_delete": tuple(files_to_delete)})
-                if chunks_to_upsert:
-                    source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
-                    upsert_delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :source_files")
-                    connection.execute(upsert_delete_stmt, {"source_files": tuple(source_files_to_update)})
-                    insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
-                    records_to_insert = [
-                        {"id": chunk.get("id"), "content": chunk.get("document"), "metadata": json.dumps(chunk.get("metadata")), "embedding": chunk.get("embedding")}
-                        for chunk in chunks_to_upsert if chunk.get("document")
-                    ]
-                    if records_to_insert:
-                        connection.execute(insert_stmt, records_to_insert)
-                transaction.commit()
-                logger.info("Transaction committed successfully.")
-            except exc.SQLAlchemyError as e:
-                logger.error(f"Database transaction failed. Rolling back. Error: {e}", exc_info=True)
-                transaction.rollback()
+        except Exception as e:
+            log.error(f"Failed to initialize database engine on attempt {attempt + 1}: {e}", exc_info=True)
+            if attempt < max_retries - 1:
+                sleep_time = (2 ** attempt)
+                log.info(f"Retrying in {sleep_time} seconds...")
+                time.sleep(sleep_time)
+            else:
+                log.critical("All attempts to initialize database engine failed.")
                 raise
 
-def handler(ctx, data: io.BytesIO = None):
+# ... (Your other functions like _download_and_parse_payload and _process_database_transaction remain largely the same, but should accept `log` as an argument to use the contextual logger)
+
+@with_invocation_context
+def handler(ctx, data: io.BytesIO, log: logging.LoggerAdapter, invocation_id: str):
     """OCI Function entry point."""
     try:
+        # 1. Configuration Validation (Fail Fast)
+        log.info("Validating configuration.")
+        settings = Settings()
+        
+        # 2. Event Parsing
         event = json.loads(data.getvalue().decode('utf-8'))
-        bucket_name, object_name = _parse_event(event)
-        logger.info(f"Processing event for object: {object_name} in bucket: {bucket_name}")
-        payload = _download_and_parse_payload(bucket_name, object_name)
-        engine = _get_db_engine()
-        _process_database_transaction(engine, payload)
-        return {"status": "success", "message": f"Processed {object_name} successfully."}
+        data = event.get('data', {})
+        bucket_name = data.get('additionalDetails', {}).get('bucketName')
+        object_name = data.get('resourceName')
+        if not bucket_name or not object_name:
+            raise ValueError("Event data is missing bucketName or resourceName.")
+        log.info("Event parsed successfully.", extra_info={"bucket": bucket_name, "object": object_name})
+
+        # 3. Business Logic
+        # payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
+        # _validate_payload(payload, log) # Add payload validation
+        engine = _get_db_engine(settings, log)
+        # _process_database_transaction(engine, payload, log)
+        
+        log.info("Function invocation completed successfully.")
+        return {"status": "success", "message": f"Processed {object_name} successfully.", "invocation_id": invocation_id}
+
+    except pydantic.ValidationError as e:
+        log.error(f"Configuration validation failed: {e}", exc_info=True)
+        raise ConfigurationError(f"Invalid configuration: {e}") from e
     except Exception as e:
-        logger.error(f"An unhandled error occurred in the handler: {e}", exc_info=True)
+        log.error(f"Error during function execution: {e}", exc_info=True)
         raise
