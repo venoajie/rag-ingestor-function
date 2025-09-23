@@ -54,7 +54,9 @@ def with_invocation_context(func):
     """Decorator to add invocation context and top-level error handling."""
     @wraps(func)
     def wrapper(ctx, data: io.BytesIO = None):
-        invocation_id = ctx.FnInvokeID() or str(uuid.uuid4())
+        # More robust way to get the invocation ID from headers
+        headers = ctx.Headers()
+        invocation_id = headers.get("fn-invoke-id") or str(uuid.uuid4())
         
         # Use a LoggerAdapter to automatically inject the invocation_id
         adapter = logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
@@ -70,8 +72,7 @@ def with_invocation_context(func):
             )
             # Re-raise to ensure the function fails correctly
             raise
-    return wrapper
-
+            
 # --- 3. Strict Configuration Validation with Pydantic ---
 class ConfigurationError(Exception):
     pass
