@@ -155,6 +155,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+new-secret-payload.json
 
 # Spyder project settings
 .spyderproject
