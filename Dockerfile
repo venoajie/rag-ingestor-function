@@ -2,7 +2,7 @@
 # --- Stage 1: The Builder Stage ---
 # Use a full-featured base image that includes build tools like gcc.
 # This allows pip to compile C extensions like 'httptools' from source.
-FROM python:3.12-slim AS builder
+FROM python:3.11-slim AS builder
 
 # Install system-level build dependencies required for compiling some Python packages.
 # 'build-essential' provides gcc, make, etc.
@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Stage 2: The Final Runtime Stage ---
 # Use a minimal, secure base image for the final application.
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 # Set the working directory for the function code.
 WORKDIR /function
