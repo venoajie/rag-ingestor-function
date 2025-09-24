@@ -149,7 +149,10 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         raise
 
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
-    """Handles the core database logic within a single, atomic transaction."""
+    """
+    Handles the core database logic within a single, atomic transaction,
+    using production-ready, high-performance patterns.
+    """
     table_name_raw = payload.get("table_name")
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
@@ -169,35 +172,40 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     
-                    # THE FINAL FIX: Manually and safely format the IN clause
-                    # 1. Create a dictionary of parameters to pass securely
-                    params = {f"file_{i}": filename for i, filename in enumerate(files_to_delete)}
-                    # 2. Create a string of placeholders, e.g., "(:file_0, :file_1, :file_2)"
-                    placeholders = ", ".join([f":{key}" for key in params.keys()])
-                    # 3. Build the final, safe SQL statement
-                    delete_sql = f"DELETE FROM {table_name} WHERE (metadata->>'source') IN ({placeholders})"
-                    
-                    connection.execute(text(delete_sql), params)
+                    # REFINEMENT 1: Use PostgreSQL's ANY() operator with an array parameter.
+                    # This is more performant for large lists and sidesteps IN-clause expansion issues.
+                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:files_array)")
+                    connection.execute(delete_sql, {"files_array": list(files_to_delete)})
 
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
                     
-                    # THE FINAL FIX: Apply the same safe, manual formatting pattern here
-                    params = {f"src_{i}": filename for i, filename in enumerate(source_files_to_update)}
-                    placeholders = ", ".join([f":{key}" for key in params.keys()])
-                    upsert_delete_sql = f"DELETE FROM {table_name} WHERE (metadata->>'source') IN ({placeholders})"
-                    
-                    connection.execute(text(upsert_delete_sql), params)
+                    # Apply the same robust ANY() pattern for the upsert's delete step.
+                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:sources_array)")
+                    connection.execute(upsert_delete_sql, {"sources_array": source_files_to_update})
                     
                     insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
+                    
+                    # REFINEMENT 2: Let SQLAlchemy handle JSON serialization. Do not call json.dumps().
                     records_to_insert = [
-                        {"id": chunk.get("id"), "content": chunk.get("document"), "metadata": json.dumps(chunk.get("metadata")), "embedding": chunk.get("embedding")}
+                        {
+                            "id": chunk.get("id"), 
+                            "content": chunk.get("document"), 
+                            "metadata": chunk.get("metadata"),  # Pass the dict directly
+                            "embedding": chunk.get("embedding")
+                        }
                         for chunk in chunks_to_upsert if chunk.get("document")
                     ]
+
                     if records_to_insert:
-                        log.info(f"Inserting {len(records_to_insert)} new chunks.")
-                        connection.execute(insert_stmt, records_to_insert)
+                        # REFINEMENT 3: Insert in batches for production robustness.
+                        # This prevents exceeding parameter limits or memory constraints with large files.
+                        batch_size = 500 # A safe and performant batch size
+                        log.info(f"Inserting {len(records_to_insert)} new chunks in batches of {batch_size}.")
+                        for i in range(0, len(records_to_insert), batch_size):
+                            batch = records_to_insert[i:i + batch_size]
+                            connection.execute(insert_stmt, batch)
 
                 transaction.commit()
                 log.info("Transaction committed successfully.")
@@ -205,6 +213,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 log.error("Database transaction failed. Rolling back.", exc_info=True)
                 transaction.rollback()
                 raise
+                
 
 @with_invocation_context
 def handler(ctx, data: io.BytesIO = None):
