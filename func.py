@@ -18,6 +18,7 @@ import pydantic_settings
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.engine import Engine
 
+# --- [Logging, Decorator, Pydantic sections are unchanged] ---
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -108,9 +109,9 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             db_secret_data = json.loads(secret_content)
             db_config = DbSecret.model_validate(db_secret_data)
             
-            # THE FINAL FIX: Use the psycopg2 dialect for robust parameter handling
+            # THE CRITICAL FIX: Use the 'psycopg' dialect to match the installed driver.
             db_connection_string = (
-                f"postgresql+psycopg2://{db_config.username}:{db_config.password.get_secret_value()}"
+                f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}"
                 f"@{db_config.host}:{db_config.port}/{db_config.dbname}"
             )
             
@@ -134,6 +135,7 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
                 log.critical("All attempts to initialize database engine failed.")
                 raise
 
+# --- [_download_and_parse_payload is unchanged] ---
 def _download_and_parse_payload(settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
@@ -148,6 +150,7 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         log.error(f"Failed to download or parse payload for object '{object_name}'.", exc_info=True)
         raise
 
+# --- [_process_database_transaction is already correct from the previous step] ---
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
     """
     Handles the core database logic within a single, atomic transaction,
@@ -214,7 +217,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 transaction.rollback()
                 raise
                 
-
+# --- [handler function is unchanged] ---
 @with_invocation_context
 def handler(ctx, data: io.BytesIO = None):
     log = ctx.log
