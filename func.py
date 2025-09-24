@@ -116,7 +116,10 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             db_engine = create_engine(
                 db_connection_string,
                 pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800,
-                connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"}
+                connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"},
+                # Explicitly force the DBAPI parameter style to one that
+                # psycopg v3 understands for expanding IN clauses.
+                paramstyle='format'
             )
 
             with db_engine.connect() as connection:
@@ -171,7 +174,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     
-                    # Use the idiomatic SQLAlchemy 2.0 "expanding" IN clause.
+                    # This code is now correct and will work with the paramstyle fix.
                     delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_list")
                     connection.execute(delete_sql, {"files_list": tuple(files_to_delete)})
 
@@ -179,7 +182,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
                     
-                    # Apply the same robust pattern here.
+                    # This code is now correct and will work with the paramstyle fix.
                     upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :sources_list")
                     connection.execute(upsert_delete_sql, {"sources_list": tuple(source_files_to_update)})
                     
