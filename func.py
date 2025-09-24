@@ -4,7 +4,6 @@ import gzip
 import io
 import json
 import logging
-import re
 import time
 import traceback
 import uuid
@@ -14,10 +13,19 @@ from datetime import datetime
 import oci
 import pydantic
 import pydantic_settings
-from sqlalchemy import create_engine, text, exc, Table, MetaData, Column
+from sqlalchemy import create_engine, text, exc, Table, MetaData, Column, values, column
 from sqlalchemy.engine import Engine
 from sqlalchemy.dialects.postgresql import JSONB, TEXT, UUID as PG_UUID
 from sqlalchemy.sql import delete, insert
+from pgvector.sqlalchemy import Vector # <-- IMPORT: For pgvector data type
+
+# --- 0. Application-Specific Constants ---
+# CRITICAL: Set this to the dimension of your embedding model (e.g., 1536 for OpenAI text-embedding-ada-002)
+VECTOR_DIMENSION = 1536 
+
+# SECURITY: Define an explicit allowlist of table names that can be modified by this function.
+ALLOWED_TABLES = {'my_rag_documents'}
+
 
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
@@ -153,8 +161,9 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
 
-    if not table_name_raw or not re.match(r'^[a-zA-Z0-_]+$', table_name_raw):
-        raise ValueError(f"Payload provides an invalid or missing 'table_name': {table_name_raw}")
+    # FIX 1: SECURITY - Validate table name against a strict allowlist
+    if table_name_raw not in ALLOWED_TABLES:
+        raise ValueError(f"Payload provides an invalid or disallowed 'table_name': {table_name_raw}")
     table_name = table_name_raw
 
     metadata_obj = MetaData()
@@ -164,7 +173,8 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
         Column("id", PG_UUID, primary_key=True),
         Column("content", TEXT),
         Column("metadata", JSONB),
-        Column("embedding")
+        # FIX 2: DATA INTEGRITY - Use the correct Vector type for the embedding column
+        Column("embedding", Vector(VECTOR_DIMENSION))
     )
 
     log.info(f"Beginning database transaction for table '{table_name}'.", extra={
@@ -175,27 +185,40 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
     with engine.connect() as connection:
         with connection.begin() as transaction:
             try:
+                # FIX 3: IDIOMATIC SQLALCHEMY - Use VALUES clause for robust batch deletes
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
+                    # Create a VALUES clause that acts like a temporary table of keys to delete
+                    vals = values(column("source_file", TEXT), name="files_to_delete_values").data(
+                        [(f,) for f in files_to_delete]
+                    )
+                    # Correlate the target table with the VALUES clause for deletion
                     delete_stmt = delete(target_table).where(
-                        target_table.c.metadata['source'].astext.in_(files_to_delete)
+                        target_table.c.metadata['source'].astext == vals.c.source_file
                     )
                     connection.execute(delete_stmt)
 
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
-                    upsert_delete_stmt = delete(target_table).where(
-                        target_table.c.metadata['source'].astext.in_(source_files_to_update)
-                    )
-                    connection.execute(upsert_delete_stmt)
+                    
+                    # FIX 3: IDIOMATIC SQLALCHEMY - Apply the same robust VALUES pattern for the upsert's delete step
+                    if source_files_to_update:
+                        update_vals = values(column("source_file", TEXT), name="files_to_update_values").data(
+                            [(f,) for f in source_files_to_update]
+                        )
+                        upsert_delete_stmt = delete(target_table).where(
+                            target_table.c.metadata['source'].astext == update_vals.c.source_file
+                        )
+                        connection.execute(upsert_delete_stmt)
                     
                     records_to_insert = [
                         {
                             "id": chunk.get("id"), 
                             "content": chunk.get("document"), 
                             "metadata": chunk.get("metadata"),
-                            "embedding": str(chunk.get("embedding")) if chunk.get("embedding") is not None else None
+                            # FIX 2: DATA INTEGRITY - Pass the embedding list/array directly. Do NOT convert to string.
+                            "embedding": chunk.get("embedding")
                         }
                         for chunk in chunks_to_upsert if chunk.get("document")
                     ]
