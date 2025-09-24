@@ -18,7 +18,6 @@ import pydantic_settings
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.engine import Engine
 
-# --- [Logging, Decorator, Pydantic sections are unchanged] ---
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -135,7 +134,6 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
                 log.critical("All attempts to initialize database engine failed.")
                 raise
 
-# --- [_download_and_parse_payload is unchanged] ---
 def _download_and_parse_payload(settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
@@ -150,7 +148,6 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         log.error(f"Failed to download or parse payload for object '{object_name}'.", exc_info=True)
         raise
 
-# --- [_process_database_transaction is already correct from the previous step] ---
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
     """
     Handles the core database logic within a single, atomic transaction,
@@ -175,22 +172,21 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     
-                    # REFINEMENT 1: Use PostgreSQL's ANY() operator with an array parameter.
-                    # This is more performant for large lists and sidesteps IN-clause expansion issues.
-                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:files_array)")
+                    # THE FINAL FIX: Explicitly cast the parameter to a text array (::text[]).
+                    # This removes all ambiguity for the driver.
+                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:files_array::text[])")
                     connection.execute(delete_sql, {"files_array": list(files_to_delete)})
 
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
                     
-                    # Apply the same robust ANY() pattern for the upsert's delete step.
-                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:sources_array)")
-                    connection.execute(upsert_delete_sql, {"sources_array": source_files_to_update})
+                    # Apply the same explicit cast here.
+                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:sources_array::text[])")
+                    connection.execute(upsert_delete_sql, {"sources_array": list(source_files_to_update)})
                     
                     insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
                     
-                    # REFINEMENT 2: Let SQLAlchemy handle JSON serialization. Do not call json.dumps().
                     records_to_insert = [
                         {
                             "id": chunk.get("id"), 
@@ -202,9 +198,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     ]
 
                     if records_to_insert:
-                        # REFINEMENT 3: Insert in batches for production robustness.
-                        # This prevents exceeding parameter limits or memory constraints with large files.
-                        batch_size = 500 # A safe and performant batch size
+                        batch_size = 500
                         log.info(f"Inserting {len(records_to_insert)} new chunks in batches of {batch_size}.")
                         for i in range(0, len(records_to_insert), batch_size):
                             batch = records_to_insert[i:i + batch_size]
@@ -217,9 +211,10 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 transaction.rollback()
                 raise
                 
-# --- [handler function is unchanged] ---
+
 @with_invocation_context
 def handler(ctx, data: io.BytesIO = None):
+    # [Handler logic is unchanged]
     log = ctx.log
     try:
         log.info("Validating configuration.")
