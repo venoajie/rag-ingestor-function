@@ -1,15 +1,15 @@
 import base64
+import gzip
 import io
-import os
 import json
 import logging
-import gzip
 import re
-import uuid
 import time
 import traceback
+import uuid
 from functools import wraps
 from datetime import datetime
+from sqlalchemy import bindparam
 
 import oci
 import pydantic
@@ -157,6 +157,7 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         raise
 
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
+    """Handles the core database logic within a single, atomic transaction."""
     table_name_raw = payload.get("table_name")
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
@@ -175,13 +176,20 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
             try:
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
+                    # THE FIX: Use an expanding bindparam for the IN clause
                     delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_to_delete")
-                    connection.execute(delete_stmt, {"files_to_delete": tuple(files_to_delete)})
+                    delete_stmt = delete_stmt.bindparams(bindparam("files_to_delete", expanding=True))
+                    connection.execute(delete_stmt, {"files_to_delete": list(files_to_delete)})
+                
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
+                    
+                    # THE FIX: Apply the same pattern here
                     upsert_delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :source_files")
-                    connection.execute(upsert_delete_stmt, {"source_files": tuple(source_files_to_update)})
+                    upsert_delete_stmt = upsert_delete_stmt.bindparams(bindparam("source_files", expanding=True))
+                    connection.execute(upsert_delete_stmt, {"source_files": source_files_to_update})
+                    
                     insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
                     records_to_insert = [
                         {"id": chunk.get("id"), "content": chunk.get("document"), "metadata": json.dumps(chunk.get("metadata")), "embedding": chunk.get("embedding")}
@@ -190,6 +198,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     if records_to_insert:
                         log.info(f"Inserting {len(records_to_insert)} new chunks.")
                         connection.execute(insert_stmt, records_to_insert)
+
                 transaction.commit()
                 log.info("Transaction committed successfully.")
             except exc.SQLAlchemyError as e:
