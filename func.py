@@ -1,5 +1,5 @@
 
-import base64
+import base4
 import gzip
 import io
 import json
@@ -18,7 +18,6 @@ import pydantic_settings
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.engine import Engine
 
-# --- [Logging, Decorator, Pydantic, _get_db_engine, _download_and_parse_payload sections are unchanged and correct] ---
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -172,17 +171,19 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     
-                    # THE FINAL FIX: Use the unambiguous CAST(:param AS text[]) syntax.
-                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(CAST(:files_array AS text[]))")
-                    connection.execute(delete_sql, {"files_array": list(files_to_delete)})
+                    # Revert to the idiomatic SQLAlchemy 2.0 "expanding" IN clause.
+                    # This is the canonical way to handle this and avoids all casting/parsing issues.
+                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_list")
+                    # Pass the values as a tuple, which is the expected format.
+                    connection.execute(delete_sql, {"files_list": tuple(files_to_delete)})
 
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
                     
-                    # Apply the same unambiguous syntax here.
-                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(CAST(:sources_array AS text[]))")
-                    connection.execute(upsert_delete_sql, {"sources_array": list(source_files_to_update)})
+                    # Apply the same robust pattern here.
+                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :sources_list")
+                    connection.execute(upsert_delete_sql, {"sources_list": tuple(source_files_to_update)})
                     
                     insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
                     
@@ -244,3 +245,4 @@ def handler(ctx, data: io.BytesIO = None):
     except Exception as e:
         log.error(f"Error during function execution: {e}", exc_info=True)
         raise
+```
