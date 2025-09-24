@@ -15,10 +15,10 @@ import oci
 import pydantic
 import pydantic_settings
 from sqlalchemy import create_engine, text, exc, Table, MetaData, Column
+from sqlalchemy.engine import Engine
 from sqlalchemy.dialects.postgresql import JSONB, TEXT, UUID as PG_UUID
 from sqlalchemy.sql import delete, insert
 
-# --- [Logging, Decorator, Pydantic sections are correct and unchanged] ---
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -153,7 +153,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
 
-    if not table_name_raw or not re.match(r'^[a-zA-Z0-9_]+$', table_name_raw):
+    if not table_name_raw or not re.match(r'^[a-zA-Z0-_]+$', table_name_raw):
         raise ValueError(f"Payload provides an invalid or missing 'table_name': {table_name_raw}")
     table_name = table_name_raw
 
@@ -161,11 +161,10 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
     target_table = Table(
         table_name,
         metadata_obj,
-        # Define all columns involved in the transaction for clarity and type safety
         Column("id", PG_UUID, primary_key=True),
         Column("content", TEXT),
         Column("metadata", JSONB),
-        Column("embedding") # Let pgvector handle the type
+        Column("embedding")
     )
 
     log.info(f"Beginning database transaction for table '{table_name}'.", extra={
@@ -191,7 +190,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     )
                     connection.execute(upsert_delete_stmt)
                     
-                    # DATA TYPE HARDENING: Explicitly convert embedding list to the string format pgvector expects.
                     records_to_insert = [
                         {
                             "id": chunk.get("id"), 
@@ -203,7 +201,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     ]
                     
                     if records_to_insert:
-                        # Use the Core insert() construct for maximum consistency
                         insert_stmt = insert(target_table)
                         batch_size = 500
                         log.info(f"Inserting {len(records_to_insert)} new chunks in batches of {batch_size}.")
