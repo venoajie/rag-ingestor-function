@@ -1,3 +1,4 @@
+
 import base64
 import gzip
 import io
@@ -20,7 +21,6 @@ from sqlalchemy.engine import Engine
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
-        # Start with the standard record attributes
         log_record = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
@@ -28,13 +28,9 @@ class JSONFormatter(logging.Formatter):
             "invocation_id": getattr(record, 'invocation_id', 'N/A'),
             "logger_name": record.name,
         }
-        
-        # Add any extra fields passed to the logger
-        # This will automatically handle the 'extra' dictionary
         extra_fields = {k: v for k, v in record.__dict__.items() if k not in logging.LogRecord('', 0, '', 0, '', (), None, None).__dict__}
         if extra_fields:
             log_record.update(extra_fields)
-
         if record.exc_info:
             log_record['exception'] = {
                 "type": record.exc_info[0].__name__,
@@ -59,15 +55,11 @@ def with_invocation_context(func):
         headers = ctx.Headers()
         invocation_id = headers.get("fn-invoke-id") or str(uuid.uuid4())
         ctx.log = logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
-        
         ctx.log.info("Function invocation started.")
         try:
             return func(ctx, data)
         except Exception as e:
-            ctx.log.critical(
-                f"An unhandled exception reached the top-level wrapper: {e}",
-                exc_info=True
-            )
+            ctx.log.critical(f"An unhandled exception reached the top-level wrapper: {e}", exc_info=True)
             raise
     return wrapper
             
@@ -109,7 +101,6 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             log.info("Fetching secret from Vault.", extra={"secret_ocid": settings.DB_SECRET_OCID})
             secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
            
-            # DECODE THE SECRET
             secret_content_base64 = secret_bundle.data.secret_bundle_content.content
             decoded_bytes = base64.b64decode(secret_content_base64)
             secret_content = decoded_bytes.decode('utf-8')
@@ -117,8 +108,9 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             db_secret_data = json.loads(secret_content)
             db_config = DbSecret.model_validate(db_secret_data)
             
+            # THE FINAL FIX: Use the psycopg2 dialect for robust parameter handling
             db_connection_string = (
-                f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}"
+                f"postgresql+psycopg2://{db_config.username}:{db_config.password.get_secret_value()}"
                 f"@{db_config.host}:{db_config.port}/{db_config.dbname}"
             )
             
@@ -157,7 +149,6 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         raise
 
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
-    """Handles the core database logic within a single, atomic transaction."""
     table_name_raw = payload.get("table_name")
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
@@ -176,7 +167,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
             try:
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
-                    # THE FIX: Use an expanding bindparam for the IN clause
                     delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_to_delete")
                     delete_stmt = delete_stmt.bindparams(bindparam("files_to_delete", expanding=True))
                     connection.execute(delete_stmt, {"files_to_delete": list(files_to_delete)})
@@ -184,8 +174,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
-                    
-                    # THE FIX: Apply the same pattern here
                     upsert_delete_stmt = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :source_files")
                     upsert_delete_stmt = upsert_delete_stmt.bindparams(bindparam("source_files", expanding=True))
                     connection.execute(upsert_delete_stmt, {"source_files": source_files_to_update})
