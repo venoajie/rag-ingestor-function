@@ -1,9 +1,11 @@
 
+
 import base64
 import gzip
 import io
 import json
 import logging
+import re
 import time
 import traceback
 import uuid
@@ -17,15 +19,10 @@ from sqlalchemy import create_engine, text, exc, Table, MetaData, Column, values
 from sqlalchemy.engine import Engine
 from sqlalchemy.dialects.postgresql import JSONB, TEXT, UUID as PG_UUID
 from sqlalchemy.sql import delete, insert
-from pgvector.sqlalchemy import Vector # <-- IMPORT: For pgvector data type
+from pgvector.sqlalchemy import Vector
 
 # --- 0. Application-Specific Constants ---
-# CRITICAL: Set this to the dimension of your embedding model (e.g., 1536 for OpenAI text-embedding-ada-002)
-VECTOR_DIMENSION = 1536 
-
-# SECURITY: Define an explicit allowlist of table names that can be modified by this function.
-ALLOWED_TABLES = {'my_rag_documents'}
-
+VECTOR_DIMENSION = 1536
 
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
@@ -88,6 +85,7 @@ class Settings(pydantic_settings.BaseSettings):
 # --- 4. Core Logic ---
 db_engine: Engine | None = None
 
+# ... (_get_db_engine, _download_and_parse_payload - NO CHANGES) ...
 def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
     global db_engine
     if db_engine is not None:
@@ -156,14 +154,42 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         log.error(f"Failed to download or parse payload for object '{object_name}'.", exc_info=True)
         raise
 
+# NEW: Helper function for secure, dynamic table validation
+def _validate_table_exists(connection: 'Connection', table_name: str, log: logging.LoggerAdapter):
+    """
+    Securely checks if a table exists in the database.
+    This prevents SQL injection and ensures the ingestor only acts on provisioned tables.
+    """
+    # 1. First, perform a strict regex check on the table name format.
+    # This pattern matches the one defined in the indexer.
+    if not re.match(r'^codebase_collection_[a-zA-Z0-9_]+$', table_name):
+        log.error("Table name failed syntactic validation.", table_name=table_name)
+        raise ValueError(f"Payload provides a syntactically invalid table name: {table_name}")
+
+    # 2. Second, query the database's information schema using a parameterized query.
+    # This is a safe way to check for table existence without risk of injection.
+    query = text("""
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = :table_name
+    """)
+    result = connection.execute(query, {"table_name": table_name}).scalar_one_or_none()
+    
+    if result is None:
+        log.error("Validation failed: Table does not exist in the database.", table_name=table_name)
+        raise ValueError(f"Attempted to ingest data for non-existent table: {table_name}. The CI/CD pipeline must create this table first.")
+    
+    log.info("Table validation successful. Table exists.", table_name=table_name)
+
+
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
     table_name_raw = payload.get("table_name")
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
 
-    # FIX 1: SECURITY - Validate table name against a strict allowlist
-    if table_name_raw not in ALLOWED_TABLES:
-        raise ValueError(f"Payload provides an invalid or disallowed 'table_name': {table_name_raw}")
+    if not table_name_raw:
+        raise ValueError("Payload is missing required 'table_name' field.")
+    
+    # The raw name is now the final name after validation
     table_name = table_name_raw
 
     metadata_obj = MetaData()
@@ -173,7 +199,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
         Column("id", PG_UUID, primary_key=True),
         Column("content", TEXT),
         Column("metadata", JSONB),
-        # FIX 2: DATA INTEGRITY - Use the correct Vector type for the embedding column
         Column("embedding", Vector(VECTOR_DIMENSION))
     )
 
@@ -183,16 +208,17 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
     })
 
     with engine.connect() as connection:
+        # MODIFIED: Perform dynamic validation before starting the transaction
+        _validate_table_exists(connection, table_name, log)
+
         with connection.begin() as transaction:
             try:
-                # FIX 3: IDIOMATIC SQLALCHEMY - Use VALUES clause for robust batch deletes
+                # ... (The rest of the transaction logic using VALUES clause remains the same) ...
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
-                    # Create a VALUES clause that acts like a temporary table of keys to delete
                     vals = values(column("source_file", TEXT), name="files_to_delete_values").data(
                         [(f,) for f in files_to_delete]
                     )
-                    # Correlate the target table with the VALUES clause for deletion
                     delete_stmt = delete(target_table).where(
                         target_table.c.metadata['source'].astext == vals.c.source_file
                     )
@@ -202,7 +228,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
                     
-                    # FIX 3: IDIOMATIC SQLALCHEMY - Apply the same robust VALUES pattern for the upsert's delete step
                     if source_files_to_update:
                         update_vals = values(column("source_file", TEXT), name="files_to_update_values").data(
                             [(f,) for f in source_files_to_update]
@@ -217,7 +242,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                             "id": chunk.get("id"), 
                             "content": chunk.get("document"), 
                             "metadata": chunk.get("metadata"),
-                            # FIX 2: DATA INTEGRITY - Pass the embedding list/array directly. Do NOT convert to string.
                             "embedding": chunk.get("embedding")
                         }
                         for chunk in chunks_to_upsert if chunk.get("document")
@@ -237,7 +261,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 log.error("Database transaction failed. Rolling back.", exc_info=True)
                 transaction.rollback()
                 raise
-                
+
 @with_invocation_context
 def handler(ctx, data: io.BytesIO = None):
     log = ctx.log
