@@ -171,7 +171,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     
-                    # THE CORRECT SOLUTION: Use the idiomatic SQLAlchemy 2.0 "expanding" IN clause.
+                    # Use the idiomatic SQLAlchemy 2.0 "expanding" IN clause.
                     delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_list")
                     connection.execute(delete_sql, {"files_list": tuple(files_to_delete)})
 
