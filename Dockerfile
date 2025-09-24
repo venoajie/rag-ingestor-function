@@ -2,7 +2,7 @@
 # --- Stage 1: The Builder Stage ---
 # Use a full-featured base image that includes build tools like gcc.
 # This allows pip to compile C extensions like 'httptools' from source.
-FROM python:3.12-bookworm as builder
+FROM python:3.12-bookworm AS builder
 
 # Install system-level build dependencies required for compiling some Python packages.
 # 'build-essential' provides gcc, make, etc.
