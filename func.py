@@ -1,5 +1,5 @@
 
-import base4
+import base64
 import gzip
 import io
 import json
@@ -171,10 +171,8 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     
-                    # Revert to the idiomatic SQLAlchemy 2.0 "expanding" IN clause.
-                    # This is the canonical way to handle this and avoids all casting/parsing issues.
+                    # THE CORRECT SOLUTION: Use the idiomatic SQLAlchemy 2.0 "expanding" IN clause.
                     delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_list")
-                    # Pass the values as a tuple, which is the expected format.
                     connection.execute(delete_sql, {"files_list": tuple(files_to_delete)})
 
                 if chunks_to_upsert:
@@ -245,4 +243,3 @@ def handler(ctx, data: io.BytesIO = None):
     except Exception as e:
         log.error(f"Error during function execution: {e}", exc_info=True)
         raise
-```
