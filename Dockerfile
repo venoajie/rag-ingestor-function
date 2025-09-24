@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Stage 2: The Final Runtime Stage ---
 # Use a minimal, secure base image for the final application.
-FROM python:3.12-slim-slim
+FROM python:3.12-slim
 
 # Set the working directory for the function code.
 WORKDIR /function
