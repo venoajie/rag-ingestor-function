@@ -18,6 +18,7 @@ import pydantic_settings
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.engine import Engine
 
+# --- [Logging, Decorator, Pydantic, _get_db_engine, _download_and_parse_payload sections are unchanged and correct] ---
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -108,7 +109,6 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             db_secret_data = json.loads(secret_content)
             db_config = DbSecret.model_validate(db_secret_data)
             
-            # THE CRITICAL FIX: Use the 'psycopg' dialect to match the installed driver.
             db_connection_string = (
                 f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}"
                 f"@{db_config.host}:{db_config.port}/{db_config.dbname}"
@@ -172,17 +172,16 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
                     
-                    # THE FINAL FIX: Explicitly cast the parameter to a text array (::text[]).
-                    # This removes all ambiguity for the driver.
-                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:files_array::text[])")
+                    # THE FINAL FIX: Use the unambiguous CAST(:param AS text[]) syntax.
+                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(CAST(:files_array AS text[]))")
                     connection.execute(delete_sql, {"files_array": list(files_to_delete)})
 
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
                     
-                    # Apply the same explicit cast here.
-                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(:sources_array::text[])")
+                    # Apply the same unambiguous syntax here.
+                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') = ANY(CAST(:sources_array AS text[]))")
                     connection.execute(upsert_delete_sql, {"sources_array": list(source_files_to_update)})
                     
                     insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
@@ -191,7 +190,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                         {
                             "id": chunk.get("id"), 
                             "content": chunk.get("document"), 
-                            "metadata": chunk.get("metadata"),  # Pass the dict directly
+                            "metadata": chunk.get("metadata"),
                             "embedding": chunk.get("embedding")
                         }
                         for chunk in chunks_to_upsert if chunk.get("document")
@@ -214,7 +213,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
 
 @with_invocation_context
 def handler(ctx, data: io.BytesIO = None):
-    # [Handler logic is unchanged]
     log = ctx.log
     try:
         log.info("Validating configuration.")
