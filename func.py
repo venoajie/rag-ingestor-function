@@ -10,14 +10,15 @@ import traceback
 import uuid
 from functools import wraps
 from datetime import datetime
-from sqlalchemy import bindparam
 
 import oci
 import pydantic
 import pydantic_settings
-from sqlalchemy import create_engine, text, exc
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine, text, exc, Table, MetaData, Column
+from sqlalchemy.dialects.postgresql import JSONB, TEXT, UUID as PG_UUID
+from sqlalchemy.sql import delete, insert
 
+# --- [Logging, Decorator, Pydantic sections are correct and unchanged] ---
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -116,10 +117,7 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             db_engine = create_engine(
                 db_connection_string,
                 pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800,
-                connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"},
-                # Explicitly force the DBAPI parameter style to one that
-                # psycopg v3 understands for expanding IN clauses.
-                paramstyle='format'
+                connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"}
             )
 
             with db_engine.connect() as connection:
@@ -151,10 +149,6 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
         raise
 
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
-    """
-    Handles the core database logic within a single, atomic transaction,
-    using production-ready, high-performance patterns.
-    """
     table_name_raw = payload.get("table_name")
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
@@ -162,6 +156,17 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
     if not table_name_raw or not re.match(r'^[a-zA-Z0-9_]+$', table_name_raw):
         raise ValueError(f"Payload provides an invalid or missing 'table_name': {table_name_raw}")
     table_name = table_name_raw
+
+    metadata_obj = MetaData()
+    target_table = Table(
+        table_name,
+        metadata_obj,
+        # Define all columns involved in the transaction for clarity and type safety
+        Column("id", PG_UUID, primary_key=True),
+        Column("content", TEXT),
+        Column("metadata", JSONB),
+        Column("embedding") # Let pgvector handle the type
+    )
 
     log.info(f"Beginning database transaction for table '{table_name}'.", extra={
         "chunks_to_upsert": len(chunks_to_upsert),
@@ -173,32 +178,33 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
             try:
                 if files_to_delete:
                     log.info(f"Deleting {len(files_to_delete)} source files.")
-                    
-                    # This code is now correct and will work with the paramstyle fix.
-                    delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :files_list")
-                    connection.execute(delete_sql, {"files_list": tuple(files_to_delete)})
+                    delete_stmt = delete(target_table).where(
+                        target_table.c.metadata['source'].astext.in_(files_to_delete)
+                    )
+                    connection.execute(delete_stmt)
 
                 if chunks_to_upsert:
                     source_files_to_update = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     log.info(f"Upserting data for {len(source_files_to_update)} source files.")
+                    upsert_delete_stmt = delete(target_table).where(
+                        target_table.c.metadata['source'].astext.in_(source_files_to_update)
+                    )
+                    connection.execute(upsert_delete_stmt)
                     
-                    # This code is now correct and will work with the paramstyle fix.
-                    upsert_delete_sql = text(f"DELETE FROM {table_name} WHERE (metadata->>'source') IN :sources_list")
-                    connection.execute(upsert_delete_sql, {"sources_list": tuple(source_files_to_update)})
-                    
-                    insert_stmt = text(f"INSERT INTO {table_name} (id, content, metadata, embedding) VALUES (:id, :content, :metadata, :embedding)")
-                    
+                    # DATA TYPE HARDENING: Explicitly convert embedding list to the string format pgvector expects.
                     records_to_insert = [
                         {
                             "id": chunk.get("id"), 
                             "content": chunk.get("document"), 
                             "metadata": chunk.get("metadata"),
-                            "embedding": chunk.get("embedding")
+                            "embedding": str(chunk.get("embedding")) if chunk.get("embedding") is not None else None
                         }
                         for chunk in chunks_to_upsert if chunk.get("document")
                     ]
-
+                    
                     if records_to_insert:
+                        # Use the Core insert() construct for maximum consistency
+                        insert_stmt = insert(target_table)
                         batch_size = 500
                         log.info(f"Inserting {len(records_to_insert)} new chunks in batches of {batch_size}.")
                         for i in range(0, len(records_to_insert), batch_size):
@@ -212,7 +218,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 transaction.rollback()
                 raise
                 
-
 @with_invocation_context
 def handler(ctx, data: io.BytesIO = None):
     log = ctx.log
