@@ -1,56 +1,108 @@
 
-import oci
 import os
-from sqlalchemy import create_engine
+import io
+import json
+import gzip
+import base64
+import unittest.mock
+from unittest.mock import MagicMock
 
-# --- Configuration ---
-# Use the same environment variables your function uses
-SECRET_OCID = "ocid1.vaultsecret.oc1.eu-frankfurt-1.amaaaaaaaenu5lyas5scqzuhlws7pzsg6jxsmcbybu2uecizvqs5p2ghbuda"
+# Set environment variables BEFORE importing the function
+# These are needed for the Pydantic Settings model
+os.environ["DB_SECRET_OCID"] = "ocid1.vaultsecret.oc1..dummy"
+os.environ["OCI_NAMESPACE"] = "dummy_namespace"
 
-print("--- Starting Local Database Connection Test ---")
+# Now, import the handler from your main file
+from func import handler
 
-try:
-    # Step 1: Authenticate using your local ~/.oci/config file
-    print("Authenticating with local OCI config...")
-    config = oci.config.from_file()
-    signer = oci.signer.Signer(
-        tenancy=config["tenancy"],
-        user=config["user"],
-        fingerprint=config["fingerprint"],
-        private_key_file_location=config["key_file"],
-        pass_phrase=oci.config.get_config_value_or_default(config, "pass_phrase"),
-    )
-    secrets_client = oci.secrets.SecretsClient(config={}, signer=signer)
-    print("Authentication successful.")
-
-    # Step 2: Fetch the secret from OCI Vault
-    print(f"Fetching secret: {SECRET_OCID}")
-    secret_bundle = secrets_client.get_secret_bundle(secret_id=SECRET_OCID)
-    secret_content = secret_bundle.data.secret_bundle_content.content
-    print("Secret fetched successfully.")
-
-    # Step 3: THIS IS THE BLACK BOX RECORDER. Print the raw secret.
-    # The repr() function will explicitly show hidden characters like '\n'
-    print(f"RAW secret content (length {len(secret_content)}): {repr(secret_content)}")
-
-    # Step 4: Clean the secret using .strip()
-    db_connection_string_cleaned = secret_content.strip()
-    print(f"CLEANED secret content (length {len(db_connection_string_cleaned)}): {repr(db_connection_string_cleaned)}")
-
-    # Step 5: IMPORTANT - Modify the string for the SSH tunnel
-    # We replace the private IP with 'localhost' because of our tunnel
-    local_db_connection_string = db_connection_string_cleaned.replace("10.0.0.146", "localhost")
-    print(f"Final connection string for local test: '{local_db_connection_string}'")
-
-    # Step 6: Attempt to create the engine and connect
-    print("Attempting to create SQLAlchemy engine...")
-    engine = create_engine(local_db_connection_string)
+def create_mock_oci_clients():
+    """Mocks the OCI SDK clients for local testing."""
     
-    print("Engine created. Attempting to connect...")
-    with engine.connect() as connection:
-        print("✅✅✅ SUCCESS! Database connection established. ✅✅✅")
+    # --- Mock for OCI Secrets ---
+    mock_secrets_client = MagicMock()
+    
+    # Create the fake secret content (the JSON)
+    secret_data = {
+        "username": "librarian_user",
+        "password": "YOUR_REAL_DATABASE_PASSWORD", # <-- IMPORTANT: Use your real password
+        "host": "localhost", # We will connect via the SSH tunnel
+        "port": 5433,        # The local port of our SSH tunnel
+        "dbname": "librarian_db"
+    }
+    secret_json = json.dumps(secret_data)
+    secret_base64 = base64.b64encode(secret_json.encode('utf-8')).decode('utf-8')
 
-except Exception as e:
-    print(f"\n❌❌❌ TEST FAILED ❌❌❌")
-    print(f"Error Type: {type(e).__name__}")
-    print(f"Error Details: {e}")
+    # Mimic the OCI SDK's response structure
+    mock_secret_bundle = MagicMock()
+    mock_secret_bundle.data.secret_bundle_content.content = secret_base64
+    mock_secrets_client.get_secret_bundle.return_value = mock_secret_bundle
+
+    # --- Mock for OCI Object Storage ---
+    mock_os_client = MagicMock()
+
+    # Create a fake data payload
+    payload_data = {
+        "table_name": "codebase_collection_trading_app_develop", # Use a real table name
+        "chunks_to_upsert": [],
+        "files_to_delete": ["my-ai-assistant/.git/config", "docker-compose.prod.yml"]
+    }
+    
+    # Gzip the fake payload
+    gzipped_payload = io.BytesIO()
+    with gzip.GzipFile(fileobj=gzipped_payload, mode='wb') as gz:
+        gz.write(json.dumps(payload_data).encode('utf-8'))
+    
+    # Mimic the OCI SDK's response structure
+    mock_object = MagicMock()
+    mock_object.data.content = gzipped_payload.getvalue()
+    mock_os_client.get_object.return_value = mock_object
+
+    return mock_secrets_client, mock_os_client
+
+def run_local_test():
+    """Executes the function handler locally."""
+    
+    print("--- Starting Local Test ---")
+
+    # Create a mock context object that mimics the FDK
+    mock_ctx = MagicMock()
+    mock_ctx.Headers.return_value = {"fn-invoke-id": "local-test-run-123"}
+
+    # Create a mock event payload (from Object Storage)
+    event_data = {
+        "data": {
+            "resourceName": "test-payload.json.gz",
+            "additionalDetails": {
+                "bucketName": "test-bucket"
+            }
+        }
+    }
+    event_bytes = io.BytesIO(json.dumps(event_data).encode('utf-8'))
+
+    # Use unittest.mock.patch to intercept the OCI client initializations
+    with unittest.mock.patch('oci.secrets.SecretsClient') as MockSecrets, \
+         unittest.mock.patch('oci.object_storage.ObjectStorageClient') as MockOS:
+        
+        # Get our pre-configured mock clients
+        mock_secrets_client, mock_os_client = create_mock_oci_clients()
+        
+        # Tell the patch to return our mocks whenever the clients are created
+        MockSecrets.return_value = mock_secrets_client
+        MockOS.return_value = mock_os_client
+
+        print("OCI clients mocked. Invoking handler...")
+        
+        try:
+            # Run the actual handler function
+            result = handler(mock_ctx, event_bytes)
+            print("\n--- Test Result ---")
+            print(json.dumps(result, indent=2))
+            print("\nSUCCESS: The function executed without errors.")
+        except Exception as e:
+            print(f"\n--- Test FAILED ---")
+            print(f"An exception occurred: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+
+if __name__ == "__main__":
+    run_local_test()
