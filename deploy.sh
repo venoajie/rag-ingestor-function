@@ -42,6 +42,7 @@ echo "Relying on existing broader policies. Hardening will be done post-deployme
 # ==============================================================================
 echo "➡️ Logging in to OCI Container Registry using your personal Auth Token..."
 #echo "${OCI_USER_AUTH_TOKEN}" | docker login ${OCI_REGION_KEY}.ocir.io -u #${OCI_TENANCY_NAMESPACE}/${OCI_USERNAME} --password-stdin
+echo "wD{WEAP3987n>5}3#<V]" | docker login fra.ocir.io -u frpowqeyehes/ven.ajie@protonmail.com --password-stdin
 
 echo "➡️ Configuring Fn CLI context..."
 # This command will create the context or allow us to proceed if it already exists.
