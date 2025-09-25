@@ -1,71 +1,51 @@
 
-# Dockerfile
+# Dockerfile (Final Version)
 # --- Stage 1: Builder ---
-# UPGRADED: Using Python 3.12-slim on Debian Bookworm for smaller size and modern features.
-FROM python:3.12-slim-bookworm AS builder
+# Using Python 3.12-slim. No venv is created here.
+FROM python:3.12-slim-bookworm as builder
 
-# Install build essentials as a best practice.
+# Install build essentials for C extensions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user for the build process
-RUN useradd --system --create-home builder
-USER builder
-WORKDIR /home/builder
+WORKDIR /build
 
-# Create and activate the virtual environment
-RUN python3 -m venv /home/builder/venv
-ENV PATH="/home/builder/venv/bin:$PATH"
-
-# Install dependencies into the venv
-COPY --chown=builder:builder requirements.txt .
+# Install dependencies directly into the system site-packages.
+COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-
 # --- Stage 2: Runtime ---
-# UPGRADED: Using Python 3.12-slim for the final runtime image.
+# Using the same base image ensures compatibility.
 FROM python:3.12-slim-bookworm
 
-# Create a non-root user for running the application
+# Create a non-root user for running the application.
 RUN useradd --system --create-home --shell /bin/bash appuser
 WORKDIR /function
 
-# Copy the virtual environment from the builder stage
-COPY --from=builder /home/builder/venv /opt/venv
+# Copy the installed packages from the builder's system site-packages
+# to the runtime's system site-packages.
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 
-# Copy the application code
+# Copy the executables (like uvicorn) from the builder's system bin
+# to the runtime's system bin.
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy the application code.
 COPY main.py .
 
-# Pre-compile python code for a minor startup performance boost
-RUN /opt/venv/bin/python -m compileall -j 0 /opt/venv /function
+# Set correct ownership.
+RUN chown -R appuser:appuser /function
 
-# Set correct ownership for all application files
-RUN chown -R appuser:appuser /function /opt/venv
-
-# ==================== DIAGNOSTIC STEP ====================
-# List the contents of the venv's bin directory to verify executables exist.
-# This will print to the console during the 'fn deploy' build process.
-
-# This command will cause the build to FAIL if uvicorn is not found.
-# This gives us a definitive pass/fail test.
-RUN echo "--- Verifying that '/opt/venv/bin/uvicorn' exists... ---" && \
-    test -f /opt/venv/bin/uvicorn || \
-    (echo "!!! Uvicorn executable NOT FOUND. Listing bin directory for diagnostics: !!!" && ls -la /opt/venv/bin && exit 1)
-# =======================================================
-
-# Switch to the non-root user
+# Switch to the non-root user.
 USER appuser
 
-# Set environment variables for the runtime
-ENV PATH="/opt/venv/bin:$PATH"
+# Set environment variables. The PATH is already correct by default.
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Expose the port the application will run on
 EXPOSE 8080
 
-# UPGRADED: The CMD now instructs Uvicorn to use the high-performance uvloop event loop.
-# This will be overridden by func.yaml, but it's best practice to have it here.
-CMD ["/opt/venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop"]
+# The CMD can now be simple, as uvicorn is in the system PATH.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop"]
