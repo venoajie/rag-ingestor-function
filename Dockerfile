@@ -1,7 +1,9 @@
 
+```dockerfile
+# Dockerfile
 # --- Stage 1: Builder ---
-# This stage builds the virtual environment with all dependencies.
-FROM python:3.11-bullseye as builder
+# UPGRADED: Using Python 3.12-slim on Debian Bookworm for smaller size and modern features.
+FROM python:3.12-slim-bookworm as builder
 
 # Install build essentials as a best practice.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,8 +26,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 
 # --- Stage 2: Runtime ---
-# This stage creates the final, lean production image.
-FROM python:3.11-slim-bullseye
+# UPGRADED: Using Python 3.12-slim for the final runtime image.
+FROM python:3.12-slim-bookworm
 
 # Create a non-root user for running the application
 RUN useradd --system --create-home --shell /bin/bash appuser
@@ -48,13 +50,12 @@ USER appuser
 
 # Set environment variables for the runtime
 ENV PATH="/opt/venv/bin:$PATH"
-# Prevents Python from writing .pyc files to disc
 ENV PYTHONDONTWRITEBYTECODE=1
-# Ensures logs and other output are sent straight to stdout without buffering
 ENV PYTHONUNBUFFERED=1
 
 # Expose the port the application will run on
 EXPOSE 8080
 
-# The command to run the application using Uvicorn.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# UPGRADED: The CMD now instructs Uvicorn to use the high-performance uvloop event loop.
+# This will be overridden by func.yaml, but it's best practice to have it here.
+CMD ["/opt/venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop"]
