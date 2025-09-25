@@ -47,7 +47,12 @@ RUN chown -R appuser:appuser /function /opt/venv
 # ==================== DIAGNOSTIC STEP ====================
 # List the contents of the venv's bin directory to verify executables exist.
 # This will print to the console during the 'fn deploy' build process.
-RUN echo "--- Verifying contents of /opt/venv/bin ---" && ls -la /opt/venv/bin
+
+# This command will cause the build to FAIL if uvicorn is not found.
+# This gives us a definitive pass/fail test.
+RUN echo "--- Verifying that '/opt/venv/bin/uvicorn' exists... ---" && \
+    test -f /opt/venv/bin/uvicorn || \
+    (echo "!!! Uvicorn executable NOT FOUND. Listing bin directory for diagnostics: !!!" && ls -la /opt/venv/bin && exit 1)
 # =======================================================
 
 # Switch to the non-root user
