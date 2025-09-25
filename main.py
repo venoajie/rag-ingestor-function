@@ -14,7 +14,7 @@ from typing import Annotated
 import oci
 import pydantic
 import pydantic_settings
-from fastapi import FastAPI, Request, Depends, Header, HTTPException
+from fastapi import FastAPI, Request, Depends, Header
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, text, exc, Table, MetaData, Column, values, column
 from sqlalchemy.engine import Engine
@@ -73,10 +73,7 @@ class Settings(pydantic_settings.BaseSettings):
     OCI_NAMESPACE: str
     model_config = pydantic_settings.SettingsConfigDict(extra='ignore')
 
-# --- 4. Core Logic (Unchanged, but with refined exception raising) ---
-
-# This global variable acts as a stateful singleton to hold the database engine
-# across warm function invocations, which is a key performance optimization.
+# --- 4. Core Logic Helpers ---
 db_engine: Engine | None = None
 
 def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
@@ -221,35 +218,6 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 transaction.rollback()
                 raise
 
-def process_event(data: io.BytesIO, log: logging.LoggerAdapter) -> dict:
-    """The core business logic of the function."""
-    try:
-        log.info("Validating configuration.")
-        settings = Settings()
-    except pydantic.ValidationError as e:
-        log.error(f"Configuration validation failed: {e}", exc_info=True)
-        raise ConfigurationError(f"Invalid configuration: {e}") from e
-    
-    body = data.getvalue()
-    if not body:
-        raise ValueError("Received empty event payload.")
-    event = json.loads(body.decode('utf-8'))
-    
-    event_data = event.get('data', {})
-    bucket_name = event_data.get('additionalDetails', {}).get('bucketName')
-    object_name = event_data.get('resourceName')
-    if not bucket_name or not object_name:
-        raise ValueError("Event data is missing bucketName or resourceName.")
-    log.info("Event parsed successfully.", extra={"bucket": bucket_name, "object": object_name})
-
-    payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
-    engine = _get_db_engine(settings, log)
-    _process_database_transaction(engine, payload, log)
-    
-    invocation_id = log.extra['invocation_id']
-    log.info("Function invocation completed successfully.")
-    return {"status": "success", "message": f"Processed {object_name} successfully.", "invocation_id": invocation_id}
-
 # --- 5. FastAPI Application and Global Exception Handlers ---
 app = FastAPI(title="RAG Ingestor", version="2.0.4")
 
@@ -274,10 +242,42 @@ async def handle_invocation(
 ):
     log.info("Function invocation started.")
     try:
+        # Step 1: Validate configuration
+        try:
+            settings = Settings()
+        except pydantic.ValidationError as e:
+            raise ConfigurationError(f"Invalid configuration: {e}") from e
+
+        # Step 2: Parse the incoming event payload
         body_bytes = await request.body()
-        data = io.BytesIO(body_bytes)
-        result = process_event(data, log)
-        return JSONResponse(content=result, status_code=200)
+        if not body_bytes:
+            raise ValueError("Received empty event payload.")
+        event = json.loads(body_bytes.decode('utf-8'))
+        
+        event_data = event.get('data', {})
+        bucket_name = event_data.get('additionalDetails', {}).get('bucketName')
+        object_name = event_data.get('resourceName')
+        if not bucket_name or not object_name:
+            raise ValueError("Event data is missing bucketName or resourceName.")
+        log.info("Event parsed successfully.", extra={"bucket": bucket_name, "object": object_name})
+
+        # Step 3: Perform the core business logic (the expensive I/O operations)
+        engine = _get_db_engine(settings, log)
+        payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
+        _process_database_transaction(engine, payload, log)
+        
+        # Step 4: Return a successful response
+        invocation_id = log.extra['invocation_id']
+        log.info("Function invocation completed successfully.")
+        return JSONResponse(
+            content={"status": "success", "message": f"Processed {object_name} successfully.", "invocation_id": invocation_id},
+            status_code=200
+        )
+
+    except (ConfigurationError, ValueError):
+        # These are handled by the dedicated exception handlers above.
+        # Re-raising them allows the handlers to catch them.
+        raise
     except Exception as e:
         log.critical(f"An unhandled exception reached the top-level handler: {e}", exc_info=True)
         return JSONResponse(
@@ -293,4 +293,4 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     print("--- Starting local development server on http://0.0.0.0:8080 ---")
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
