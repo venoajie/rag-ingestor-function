@@ -1,35 +1,24 @@
 
 # --- Stage 1: The Builder Stage ---
-# Use a full-featured base image that includes build tools like gcc.
-# This allows pip to compile C extensions like 'httptools' from source.
-FROM python:3.11-bookworm AS builder
-
-# Install system-level 
-# Install system-level build-essential package (provides gcc).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Use Python 3.11 on Debian "Bullseye". This older, highly common base OS
+# has better binary compatibility with the pre-compiled wheels available on PyPI
+# for older packages like httptools==0.4.0. This avoids compilation entirely.
+FROM python:3.11-bullseye as builder
 
 # Create and activate the virtual environment.
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy BOTH requirements files.
-COPY requirements.txt build-requirements.txt ./
-
-# --- THE CRITICAL FIX ---
-# First, install the build-time dependencies into the venv.
-# This ensures a specific, known-good version of Cython is available.
-RUN pip install --no-cache-dir -r build-requirements.txt
-
-# Second, install the application dependencies.
-# When pip builds httptools, it will now use the pre-installed, correct Cython version.
+# Copy and install the Python dependencies.
+# Pip should now find a compatible pre-compiled wheel for httptools,
+# making gcc and build-essential unnecessary.
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 
 # --- Stage 2: The Final Runtime Stage ---
 # Use the corresponding slim image for the final, lean container.
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-bullseye
 
 WORKDIR /function
 
