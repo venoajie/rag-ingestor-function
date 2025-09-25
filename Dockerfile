@@ -44,6 +44,12 @@ RUN /opt/venv/bin/python -m compileall -j 0 /opt/venv /function
 # Set correct ownership for all application files
 RUN chown -R appuser:appuser /function /opt/venv
 
+# ==================== DIAGNOSTIC STEP ====================
+# List the contents of the venv's bin directory to verify executables exist.
+# This will print to the console during the 'fn deploy' build process.
+RUN echo "--- Verifying contents of /opt/venv/bin ---" && ls -la /opt/venv/bin
+# =======================================================
+
 # Switch to the non-root user
 USER appuser
 
