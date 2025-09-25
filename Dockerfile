@@ -1,5 +1,4 @@
 
-```dockerfile
 # Dockerfile
 # --- Stage 1: Builder ---
 # UPGRADED: Using Python 3.12-slim on Debian Bookworm for smaller size and modern features.
