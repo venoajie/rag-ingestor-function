@@ -235,6 +235,14 @@ async def value_error_handler(request: Request, exc: ValueError):
         content={"status": "error", "type": "validation_error", "message": str(exc)},
     )
 
+@app.get("/")
+async def root_health_check():
+    """
+    Handles the OCI Functions platform health check.
+    The platform sends a GET request to the invokeEndpoint to verify the container is ready.
+    """
+    return {"status": "healthy", "message": "Health check passed"}
+    
 @app.post("/")
 async def handle_invocation(
     request: Request,
