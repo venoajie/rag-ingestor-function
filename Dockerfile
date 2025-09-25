@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create a virtual environment in a standard location.
 RUN python3 -m venv /opt/venv
+RUN pip install "Cython<3.0.0"
 
 # Set the PATH to use the venv's binaries for subsequent commands.
 ENV PATH="/opt/venv/bin:$PATH"
