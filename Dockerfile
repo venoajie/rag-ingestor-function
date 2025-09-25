@@ -2,7 +2,7 @@
 # Dockerfile (Final Version)
 # --- Stage 1: Builder ---
 # Using Python 3.12-slim. No venv is created here.
-FROM python:3.12-slim-bookworm as builder
+FROM python:3.12-slim-bookworm AS builder
 
 # Install build essentials for C extensions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
