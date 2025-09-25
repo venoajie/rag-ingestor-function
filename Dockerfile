@@ -2,7 +2,7 @@
 # Dockerfile
 # --- Stage 1: Builder ---
 # UPGRADED: Using Python 3.12-slim on Debian Bookworm for smaller size and modern features.
-FROM python:3.12-slim-bookworm as builder
+FROM python:3.12-slim-bookworm AS builder
 
 # Install build essentials as a best practice.
 RUN apt-get update && apt-get install -y --no-install-recommends \
