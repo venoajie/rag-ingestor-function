@@ -1,9 +1,8 @@
-# func.yaml (Final Version)
+# func.yaml
 schema_version: 20180708
 name: rag-ingestor
-version: 2.0.4 # This will be updated by the deploy script
+version: 2.0.4
 runtime: docker
 memory: 512
 timeout: 120
-# The command is now simple because uvicorn is in the system PATH.
-cmd: uvicorn main:app --host 0.0.0.0 --port 8080 --loop uvloop
+cmd: uvicorn main:app --host 0.0.0.0 --port 8080 --loop uvloop --workers 1
