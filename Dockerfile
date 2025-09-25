@@ -1,65 +1,60 @@
-# WARNING: ADVANCED BUILD PATTERN - WHEEL HARVESTING
-# Incident ID: PB-20250924-01
-# 
-# httptools==0.4.0 source code is incompatible with Python 3.11+ C-API.
-# This build harvests a pre-compiled wheel from Python 3.10 and force-installs it.
-
-# --- Stage 0: Wheel Harvester ---
-FROM python:3.10-bullseye as wheel_harvester
-WORKDIR /wheels
-
-# Download the pre-compiled wheel for httptools==0.4.0
-# The --only-binary :all: flag ensures we ONLY get wheels, not source distributions
-# The --python-version and --platform flags ensure compatibility
-RUN pip download \
-    --only-binary :all: \
-    --platform linux_x86_64 \
-    --python-version 310 \
-    httptools==0.4.0
 
 # --- Stage 1: Builder ---
+# This stage builds the virtual environment with all dependencies.
 FROM python:3.11-bullseye as builder
 
-# Install build essentials (some other packages might need compilation)
+# Install build essentials as a best practice.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Create virtual environment
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Create a non-root user for the build process
+RUN useradd --system --create-home builder
+USER builder
+WORKDIR /home/builder
 
-# Copy the harvested wheel
-COPY --from=wheel_harvester /wheels/httptools*.whl /tmp/
+# Create and activate the virtual environment
+RUN python3 -m venv /home/builder/venv
+ENV PATH="/home/builder/venv/bin:$PATH"
 
-# Force install the Python 3.10 wheel into our Python 3.11 environment
-# --force-reinstall ensures it overwrites any existing installation
-# --no-deps prevents pip from trying to resolve dependencies (and thus rebuild)
-RUN pip install --force-reinstall --no-deps /tmp/httptools*.whl
+# Install dependencies into the venv
+COPY --chown=builder:builder requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Verify the installation succeeded
-RUN python -c "import httptools; print(f'✅ httptools {httptools.__version__} force-installed successfully')"
-
-# Now install the rest of the requirements
-# httptools is already installed, so pip won't try to build it
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Stage 2: Runtime ---
+# This stage creates the final, lean production image.
 FROM python:3.11-slim-bullseye
 
+# Create a non-root user for running the application
+RUN useradd --system --create-home --shell /bin/bash appuser
 WORKDIR /function
 
-RUN useradd --system --create-home --shell /bin/bash appuser
+# Copy the virtual environment from the builder stage
+COPY --from=builder /home/builder/venv /opt/venv
 
-COPY --from=builder /opt/venv /opt/venv
-COPY func.py .
+# Copy the application code
+COPY main.py .
 
+# Pre-compile python code for a minor startup performance boost
 RUN /opt/venv/bin/python -m compileall -j 0 /opt/venv /function
+
+# Set correct ownership for all application files
 RUN chown -R appuser:appuser /function /opt/venv
 
+# Switch to the non-root user
 USER appuser
+
+# Set environment variables for the runtime
 ENV PATH="/opt/venv/bin:$PATH"
+# Prevents Python from writing .pyc files to disc
+ENV PYTHONDONTWRITEBYTECODE=1
+# Ensures logs and other output are sent straight to stdout without buffering
 ENV PYTHONUNBUFFERED=1
 
-ENTRYPOINT ["fdk", "func.py", "handler"]
+# Expose the port the application will run on
+EXPOSE 8080
+
+# The command to run the application using Uvicorn.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
