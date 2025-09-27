@@ -1,18 +1,22 @@
-# RAG Ingestion Function - Deployment Guide v3.0 
+# OCI Serverless Function: RAG Ingestor - v4.0
 
-This repository contains the source code and deployment instructions for the RAG Ingestion Function. This guide has been updated with battle-tested commands and procedures to ensure a robust and repeatable deployment, incorporating critical lessons learned from production troubleshooting.
+This repository contains the source code and the definitive, battle-tested deployment guide for the `rag-ingestor` OCI Function. This document has been hardened with lessons learned from production incidents to ensure a robust and repeatable deployment.
 
-## 1. Overview
+## 1. Architectural Overview
 
-This is a serverless, event-driven OCI Function responsible for securely and efficiently loading indexed codebase data into a central PostgreSQL database.
+This function is a critical component of the RAG ecosystem. It is a serverless, event-driven service responsible for securely and efficiently loading indexed codebase data into a central PostgreSQL database.
 
-### Architecture Flow
+**Data Flow:**
 ```
 +------------------+      +----------------------+      +--------------------+      +------------------+
 | GitHub Actions   |----->| OCI Object Storage   |----->| OCI Function       |----->| PostgreSQL DB    |
 | (CI/CD Producer) |      | (rag-codebase-inbox) |      | (This Function)    |      | (Central DB)     |
 +------------------+      +----------------------+      +--------------------+      +------------------+
 ```
+
+**Core Technology:** This function is implemented as a self-contained **FastAPI application** running in a custom Docker container.
+
+**Architectural Decision (PB-20250924-01):** The decision to bypass the official Oracle Python FDK (`fdk`) was made after a critical, unfixable build deadlock was discovered. The `fdk`'s dependency on `httptools==0.4.0` is fundamentally incompatible with the C-API of Python 3.11+. This "FDK-less" approach resolves the build deadlock, unlocks the use of modern Python versions, and improves local testability.
 
 ## 2. Prerequisites
 
@@ -25,6 +29,8 @@ Ensure you have the following tools installed and configured:
 ---
 
 ## 3. Step-by-Step Deployment Guide
+
+This guide is designed to be executed as a script.
 
 ### Phase 0: Environment Setup
 
@@ -40,17 +46,20 @@ export VAULT_KEY_OCID="<YOUR_VAULT_MASTER_ENCRYPTION_KEY_OCID>"
 
 # --- These names are defined by the architecture ---
 export APP_NAME="rag-ecosystem-app"
+export FUNCTION_NAME="rag-ingestor"
 export BUCKET_NAME="rag-codebase-inbox"
+export DYNAMIC_GROUP_NAME="RAGIngestorFunctionDynamicGroup"
 
 # --- Set these variables for Docker and Fn CLI login ---
 export OCI_REGION="<your_oci_region_e.g.,_eu-frankfurt-1>"
 export OCI_REGION_KEY="<your_oci_region_key_e.g.,_fra>"
 export OCI_TENANCY_NAMESPACE="<your_tenancy_object_storage_namespace>"
+export OCI_USERNAME="<your_oci_username_for_docker_login>"
 ```
 
 ### Phase 1: Provision Core Infrastructure
 
-These commands create the bucket and the Functions Application that will host our code.
+These commands create the bucket and the Functions Application that will host our code. They are idempotent; running them again will not cause errors if the resources already exist.
 
 ```bash
 # 1.1. Create the Object Storage "Inbox" Bucket
@@ -68,30 +77,29 @@ oci fn application create \
   --subnet-ids "[\"$SUBNET_ID\"]"
 ```
 
-### Phase 2: Configure Permissions & Networking
+### Phase 2: Configure Permissions & Networking (IAM)
 
 This is the most critical phase. These policies grant all necessary permissions for the system to operate.
 
 ```bash
 # 2.1. Create the IAM Dynamic Group for the Function
 # This group identifies our function so we can grant it permissions.
-echo "Creating Dynamic Group..."
+echo "Creating Dynamic Group: $DYNAMIC_GROUP_NAME..."
 oci iam dynamic-group create \
-  --name "RAGIngestorFunctionDynamicGroup" \
-  --description "Dynamic group for all functions in the RAG application" \
+  --name "$DYNAMIC_GROUP_NAME" \
+  --description "Dynamic group for all functions in the RAG application compartment" \
   --matching-rule "ALL {resource.type = 'fnfunc', resource.compartment.id = '$COMPARTMENT_ID'}"
 
 # 2.2. Create the Function's Core Permissions Policy
 # This policy MUST be created in the ROOT compartment (tenancy) to correctly
-# reference the dynamic group (in the root domain) and grant it permissions
-# on resources in your project compartment.
+# reference the dynamic group and grant it permissions on resources in your project compartment.
 echo "Creating Function Permissions Policy in ROOT compartment..."
 printf '[
-  "Allow dynamic-group RAGIngestorFunctionDynamicGroup to read secret-bundles in compartment id %s where target.secret.id = ''%s''",
-  "Allow dynamic-group RAGIngestorFunctionDynamicGroup to use keys in compartment id %s where target.key.id = ''%s''",
-  "Allow dynamic-group RAGIngestorFunctionDynamicGroup to read objects in compartment id %s where target.bucket.name = ''%s''",
-  "Allow dynamic-group RAGIngestorFunctionDynamicGroup to use virtual-network-family in compartment id %s"
-]' "${COMPARTMENT_ID}" "${DB_SECRET_OCID}" "${COMPARTMENT_ID}" "${VAULT_KEY_OCID}" "${COMPARTMENT_ID}" "${BUCKET_NAME}" "${COMPARTMENT_ID}" > /tmp/statements.json
+  "Allow dynamic-group %s to read secret-bundles in compartment id %s where target.secret.id = ''%s''",
+  "Allow dynamic-group %s to use keys in compartment id %s where target.key.id = ''%s''",
+  "Allow dynamic-group %s to read objects in compartment id %s where target.bucket.name = ''%s''",
+  "Allow dynamic-group %s to use virtual-network-family in compartment id %s"
+]' "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" "${DB_SECRET_OCID}" "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" "${VAULT_KEY_OCID}" "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" "${BUCKET_NAME}" "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" > /tmp/statements.json
 
 oci iam policy create \
   --compartment-id "${TENANCY_OCID}" \
@@ -117,8 +125,8 @@ rm /tmp/statements.json
 
 ```bash
 # 3.1. Log in to OCI Container Registry (OCIR)
-# Get an Auth Token from your OCI user profile page.
-echo "<YOUR_AUTH_TOKEN>" | docker login ${OCI_REGION_KEY}.ocir.io -u ${OCI_TENANCY_NAMESPACE}/<your-oci-username> --password-stdin
+# Get an Auth Token from your OCI user profile page (Profile -> Auth Tokens).
+echo "<YOUR_AUTH_TOKEN>" | docker login ${OCI_REGION_KEY}.ocir.io -u ${OCI_TENANCY_NAMESPACE}/${OCI_USERNAME} --password-stdin
 
 # 3.2. Configure the Fn CLI Context
 fn create context oci-prod --provider oracle
@@ -128,11 +136,12 @@ fn update context api-url "https://functions.${OCI_REGION}.oci.oraclecloud.com"
 fn update context registry "${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}"
 
 # 3.3. Deploy the function
-fn deploy --app ${APP_NAME}
+# The fn CLI will read func.yaml, build the Dockerfile, push to OCIR, and create the function.
+fn -v deploy --app ${APP_NAME}
 
 # 3.4. Configure the function with its required environment variables
-fn config function ${APP_NAME} rag-ingestor DB_SECRET_OCID "${DB_SECRET_OCID}"
-fn config function ${APP_NAME} rag-ingestor OCI_NAMESPACE "${OCI_TENANCY_NAMESPACE}"
+fn config function ${APP_NAME} ${FUNCTION_NAME} DB_SECRET_OCID "${DB_SECRET_OCID}"
+fn config function ${APP_NAME} ${FUNCTION_NAME} OCI_NAMESPACE "${OCI_TENANCY_NAMESPACE}"
 ```
 
 ### Phase 4: Create the Event Rule Trigger
@@ -147,7 +156,7 @@ Using the UI is the most reliable method for this step.
     *   **Attribute:** `bucketName` = `rag-codebase-inbox`
 4.  **Actions:**
     *   **Action Type:** `Functions`
-    *   Select your compartment, `rag-ecosystem-app` application, and `rag-ingestor` function.
+    *   Select your compartment, `${APP_NAME}` application, and `${FUNCTION_NAME}` function.
 5.  Click **Create Rule**.
 
 **Deployment is now complete and the system is LIVE.**
@@ -175,13 +184,13 @@ Using the UI is the most reliable method for this step.
 
 ### **Proactive Troubleshooting: The Diagnostic Flow**
 
-If the end-to-end test fails, follow this diagnostic flow.
+If the end-to-end test fails, follow this battle-tested diagnostic flow.
 
 **Step 1: Check the Function Logs (The Function's Story)**
 
 This is your primary source of truth.
 1.  Go to OCI Console -> **Developer Services** -> **Functions**.
-2.  Navigate to your application (`rag-ecosystem-app`) and function (`rag-ingestor`).
+2.  Navigate to your application (`${APP_NAME}`) and function (`${FUNCTION_NAME}`).
 3.  Click on **Logs**. Set the time filter to the last 5 minutes.
 
 *   **If you see new logs with a `502` or other error code:**
@@ -189,10 +198,12 @@ This is your primary source of truth.
     *   Find the JSON log entry with `"level": "CRITICAL"`.
     *   Look at the `"invocation_id"`. Copy it.
     *   Filter the logs by this `invocation_id` to see the entire story of that single execution.
-    *   Examine the `"exception"` object in the critical log. The `"type"` and `"message"` will tell you exactly what went wrong (e.g., `OperationalError: connection timed out`, `ValidationError`, etc.).
+    *   Examine the `"exception"` object in the critical log. The `"type"` and `"message"` will tell you exactly what went wrong (e.g., `OperationalError: connection timed out`, `ValueError: Table does not exist...`, etc.).
 
 *   **If you see NO new logs at all:**
-    *   The function is **not being invoked**. The problem is the trigger mechanism.
-    *   Go to **Events Service -> Rules**. Verify your rule is **Active**.
-    *   Verify the conditions (Event Type, Service Name, bucketName) are correct.
-    *   Check the **Audit** logs for failed `invokeFunction` events, which indicates an IAM policy issue with the Events service itself.
+    *   The function is **not being invoked**. The problem is the trigger mechanism or a fundamental networking issue.
+    *   **A) Check the Event Rule:** Go to **Events Service -> Rules**. Verify your rule is **Active** and the conditions (Event Type, Service Name, bucketName) are correct.
+    *   **B) Check VCN Networking (Most Common Cause of No Logs):** A `504` timeout often manifests as "no logs" because the platform terminates the invocation before the function can log anything.
+        1.  **Security List (Firewall):** Ensure the function's subnet has a **Stateful Ingress** rule allowing TCP traffic on port 8080 from the `All ... Services in Oracle Services Network`.
+        2.  **Route Table:** Ensure the subnet's route table has a rule directing traffic for `All ... Services in Oracle Services Network` to a **Service Gateway**.
+        3.  **DRG Attachment:** If a DRG is attached to the VCN, ensure its attachment configuration uses an **empty DRG Route Table** to disable transit routing, which can cause silent, asymmetric routing failures.
