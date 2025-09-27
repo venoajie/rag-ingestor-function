@@ -1,5 +1,5 @@
 
-# Dockerfile (Final Version)
+# Dockerfile
 # --- Stage 1: Builder ---
 # Using Python 3.12-slim. No venv is created here.
 FROM python:3.12-slim-bookworm AS builder
