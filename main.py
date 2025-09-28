@@ -23,6 +23,8 @@ from sqlalchemy.dialects.postgresql import JSONB, TEXT, UUID as PG_UUID
 from sqlalchemy.sql import delete, insert
 from pgvector.sqlalchemy import Vector
 
+print("--- RAG INGESTOR v1.1 (dim=1024) DEPLOYED ---")
+
 # --- 0. Application-Specific Constants ---
 VECTOR_DIMENSION = 1024
 
