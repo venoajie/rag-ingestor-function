@@ -27,7 +27,7 @@ from pgvector.sqlalchemy import Vector
 # --- 0. Application-Specific Constants ---
 VECTOR_DIMENSION = 1024 # This is the corrected dimension
 
-# --- 1. Advanced Structured Logging (Unchanged) ---
+# --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
         log_record = {
@@ -57,12 +57,12 @@ handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
 logger.propagate = False
 
-# --- 2. Context-Aware Logging with FastAPI Dependency Injection (Unchanged) ---
+# --- 2. Context-Aware Logging with FastAPI Dependency Injection ---
 def get_logger(fn_invoke_id: Annotated[str | None, Header(alias="fn-invoke-id")] = None) -> logging.LoggerAdapter:
     invocation_id = fn_invoke_id or str(uuid.uuid4())
     return logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
 
-# --- 3. Strict Configuration and Custom Exceptions (Unchanged) ---
+# --- 3. Strict Configuration and Custom Exceptions ---
 class ConfigurationError(Exception): pass
 class DbSecret(pydantic.BaseModel):
     username: str
@@ -75,9 +75,9 @@ class Settings(pydantic_settings.BaseSettings):
     OCI_NAMESPACE: str
     model_config = pydantic_settings.SettingsConfigDict(extra='ignore')
 
-# --- 4. Core Logic Helpers (Unchanged) ---
-# ... (All your _get_db_engine, _download_and_parse_payload, etc. functions go here, unchanged) ...
+# --- 4. Core Logic Helpers ---
 db_engine: Engine | None = None
+
 def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
     global db_engine
     if db_engine is not None:
@@ -117,6 +117,7 @@ def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
             else:
                 log.critical("All attempts to initialize database engine failed.")
                 raise
+
 def _download_and_parse_payload(settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
@@ -130,6 +131,7 @@ def _download_and_parse_payload(settings: Settings, bucket_name: str, object_nam
     except Exception as e:
         log.error(f"Failed to download or parse payload for object '{object_name}'.", exc_info=True)
         raise
+
 def _validate_table_exists(connection: 'Connection', table_name: str, log: logging.LoggerAdapter):
     if not re.match(r'^codebase_collection_[a-zA-Z0-9_]+$', table_name):
         log.error("Table name failed syntactic validation.", table_name=table_name)
@@ -140,6 +142,7 @@ def _validate_table_exists(connection: 'Connection', table_name: str, log: loggi
         log.error("Validation failed: Table does not exist in the database.", table_name=table_name)
         raise ValueError(f"Attempted to ingest data for non-existent table: {table_name}. The CI/CD pipeline must create this table first.")
     log.info("Table validation successful. Table exists.", table_name=table_name)
+
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
     table_name_raw = payload.get("table_name")
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
@@ -187,30 +190,31 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # This code runs on startup
-    print("--- RAG INGESTOR v1.2 (dim=1024) DEPLOYED ---")
+    print("--- RAG INGESTOR v2.0 (dim=1024) DEPLOYED ---")
     yield
-    # This code runs on shutdown (not relevant for Functions)
 
 app = FastAPI(
     title="RAG Ingestor",
     version="2.1.0",
     docs_url=None,
     redoc_url=None,
-    lifespan=lifespan  # Hook the lifespan manager into the app
+    lifespan=lifespan
 )
 
-# ... (The rest of your app, exception handlers, and endpoints are unchanged) ...
 @app.exception_handler(ConfigurationError)
 async def configuration_exception_handler(request: Request, exc: ConfigurationError):
     logger.critical(f"Configuration Error: {exc}", extra={'invocation_id': 'config_error'})
     return JSONResponse(status_code=500, content={"status": "error", "type": "configuration_error", "message": str(exc)})
+
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
     logger.error(f"Value Error: {exc}", extra={'invocation_id': 'validation_error'})
     return JSONResponse(status_code=400, content={"status": "error", "type": "validation_error", "message": str(exc)})
+
 @app.get("/")
 async def root_health_check():
     return {"status": "healthy", "message": "Health check passed"}
+
 @app.post("/")
 async def handle_invocation(request: Request, log: logging.LoggerAdapter = Depends(get_logger)):
     log.info("Function invocation started.")
@@ -240,9 +244,11 @@ async def handle_invocation(request: Request, log: logging.LoggerAdapter = Depen
     except Exception as e:
         log.critical(f"An unhandled exception reached the top-level handler: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error", "type": "internal_server_error", "message": "An unexpected internal error occurred."})
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "rag-ingestor", "timestamp": datetime.utcnow().isoformat() + "Z"}
+
 if __name__ == "__main__":
     import uvicorn
     print("--- Starting local development server on http://0.0.0.0:8080 ---")
