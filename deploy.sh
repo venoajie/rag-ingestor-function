@@ -1,12 +1,20 @@
+
 #!/bin/bash
 # ==============================================================================
-# RAG Ingestor - Robust Deployment Script v2.2 (Definitive Fix)
+# RAG Ingestor - Hardened Deployment Script v2.3
 #
-# This version correctly handles Fn context recreation by first switching to
-# the 'default' context before deleting the target context. This bypasses the
-# CLI's safety mechanism and ensures a clean state for every deployment.
+# This version adds:
+#   - Dynamic function name parsing from func.yaml to prevent config errors.
+#   - Stricter shell settings (`-uo pipefail`) for improved safety.
+#   - Centralized OCIR registry variable for maintainability (DRY principle).
 # ==============================================================================
-set -e # Exit immediately if a command exits with a non-zero status.
+
+# --- Stricter Shell Settings ---
+# -e: Exit immediately if a command exits with a non-zero status.
+# -u: Treat unset variables as an error when substituting.
+# -o pipefail: The return value of a pipeline is the status of the last
+#              command to exit with a non-zero status.
+set -euo pipefail
 
 # --- ACTION REQUIRED: Fill in these 2 values ---
 export OCI_USERNAME="ven.ajie@protonmail.com" # e.g., 'firstname.lastname@example.com' or 'identity/user.name'
@@ -21,12 +29,20 @@ export OCI_REGION_KEY="fra"
 export OCI_TENANCY_NAMESPACE="frpowqeyehes"
 export APP_NAME="rag-app"
 
+# --- Derived Values (DO NOT EDIT) ---
+# IMPROVEMENT 1: Derive function name from the canonical source: func.yaml
+export FUNCTION_NAME=$(grep 'name:' func.yaml | awk '{print $2}')
+# IMPROVEMENT 2: Centralize the registry URL to avoid repetition.
+export OCIR_REGISTRY="${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}/${APP_NAME}"
+
 echo "✅ Step 1/6: Environment configured."
+echo "   - Target Function: '${FUNCTION_NAME}' (from func.yaml)"
 
 # ==============================================================================
 # PRE-FLIGHT CHECK: Verify Docker Login
 # ==============================================================================
 echo "➡️ Step 2/6: Verifying Docker login to OCIR..."
+# The `docker pull` command is a functional check of credentials.
 if ! docker pull ${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}/non-existent-image:latest 2>&1 | grep -q "unauthorized"; then
     echo "   ✅ Docker login confirmed."
 else
@@ -40,33 +56,30 @@ fi
 # SELF-HEALING: Clean and Recreate Fn Context (Corrected Logic)
 # ==============================================================================
 echo "➡️ Step 3/6: Forcing a clean recreation of the Fn CLI context..."
-# THE FIX: Switch to the 'default' context first, so 'oci-prod' is not active.
 echo "   -> Switching to 'default' context as a safe harbor."
 fn use context default
 
-# Now that 'oci-prod' is not the current context, we can safely delete it.
-# The '|| true' ensures the script doesn't fail if the context doesn't exist.
 echo "   -> Deleting old 'oci-prod' context (if it exists)."
-fn delete context oci-prod || true
+fn delete context oci-prod || true # '|| true' prevents failure if it doesn't exist.
 
-# Now, create it fresh. This will succeed.
 echo "   -> Creating a fresh 'oci-prod' context."
 fn create context oci-prod --provider oracle
 
-# Finally, switch to our newly created, clean context.
 fn use context oci-prod
 echo "   ✅ Fn context 'oci-prod' has been reset and is now in use."
 
 echo "➡️ Step 4/6: Configuring the Fn CLI context details..."
 fn update context oracle.compartment-id "${COMPARTMENT_ID}"
 fn update context api-url "https://functions.${OCI_REGION}.oci.oraclecloud.com"
-fn update context registry "${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}/${APP_NAME}"
+fn update context registry "${OCIR_REGISTRY}"
 echo "   ✅ Fn context configured."
 
 # ==============================================================================
 # DEPLOYMENT: Build, Push, and Deploy
 # ==============================================================================
 echo "➡️ Step 5/6: Building and deploying the function... (This may take a few minutes)"
+# The Fn CLI automatically bumps the version in func.yaml unless you add '--no-bump'.
+# This is usually desired for development deploys.
 fn --verbose deploy --app ${APP_NAME}
 echo "   ✅ Function deployed successfully."
 
@@ -74,21 +87,22 @@ echo "   ✅ Function deployed successfully."
 # CONFIGURATION: Apply Environment Variables
 # ==============================================================================
 echo "➡️ Step 6/6: Applying runtime configuration to the deployed function..."
-fn config function ${APP_NAME} rag-ingestor DB_SECRET_OCID "${DB_SECRET_OCID}"
-fn config function ${APP_NAME} rag-ingestor OCI_NAMESPACE "${OCI_TENANCY_NAMESPACE}"
+# IMPROVEMENT 3: Use the dynamically parsed function name.
+fn config function ${APP_NAME} ${FUNCTION_NAME} DB_SECRET_OCID "${DB_SECRET_OCID}"
+fn config function ${APP_NAME} ${FUNCTION_NAME} OCI_NAMESPACE "${OCI_TENANCY_NAMESPACE}"
 echo "   ✅ Runtime configuration applied."
 
 # ==============================================================================
 # FINAL INSTRUCTIONS
 # ==============================================================================
 echo "--------------------------------------------------------------------------"
-echo "🚀 DEPLOYMENT SUCCEEDED. The function is now deployed in OCI."
+echo "🚀 DEPLOYMENT SUCCEEDED. The function '${FUNCTION_NAME}' is now live in OCI."
 echo ""
 echo "🔴 IMMEDIATE ACTION REQUIRED:"
-echo "   1. Go to the OCI Console and create the Event Rule as described in the README."
+echo "   1. Go to the OCI Console to create/verify the Event Rule targeting this function."
 echo "   2. Perform the End-to-End Test from the README to verify functionality."
 echo ""
 echo "🔒 POST-DEPLOYMENT SECURITY HARDENING (Phase 2):"
-echo "   - We must now schedule the work to create a dedicated CI/CD user and"
-echo "     replace the broad IAM policies with a secure, least-privilege version."
+echo "   - This script uses broad user credentials. The next step is to create a"
+echo "     dedicated CI/CD user with a least-privilege IAM policy."
 echo "--------------------------------------------------------------------------"
