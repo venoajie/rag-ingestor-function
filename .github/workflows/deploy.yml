@@ -1,5 +1,5 @@
-# .github\workflows\deploy.yml
 
+name: Build and Deploy to OCI Functions
 
 on:
   push:
@@ -43,12 +43,25 @@ jobs:
         tags: ${{ env.FULL_IMAGE_NAME }}
         # No 'platform' flag needed, as we are building natively.
 
-    - name: 6. Install Fn CLI
-      run: |
-        curl -LSs https://raw.githubusercontent.com/fnproject/cli/master/install | sh
-        sudo mv ./fn /usr/local/bin/
+    # --- CORRECTED FN CLI INSTALLATION ---
+    - name: 6. Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21' # Use a version compatible with fn CLI
 
-    - name: 7. Configure Fn CLI Context
+    - name: 7. Build Fn CLI from source
+      run: |
+        echo "Cloning fn CLI repository..."
+        git clone https://github.com/fnproject/cli.git
+        cd cli
+        echo "Building fn CLI..."
+        make build
+        echo "Moving fn binary to /usr/local/bin..."
+        sudo mv fn /usr/local/bin/
+        echo "Verifying fn installation..."
+        fn version
+
+    - name: 8. Configure Fn CLI Context
       run: |
         fn create context oci-prod --provider oracle
         fn use context oci-prod
@@ -56,6 +69,6 @@ jobs:
         fn update context api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com"
         fn update context registry "${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ env.APP_NAME }}"
 
-    - name: 8. Update OCI Function
+    - name: 9. Update OCI Function
       run: |
         fn update function ${{ env.APP_NAME }} ${{ env.FUNCTION_NAME }} --image "${{ env.FULL_IMAGE_NAME }}"
