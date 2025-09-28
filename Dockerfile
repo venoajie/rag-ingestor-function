@@ -1,51 +1,61 @@
-
-# Dockerfile
 # --- Stage 1: Builder ---
-# Using Python 3.12-slim. No venv is created here.
-FROM python:3.12-slim-bookworm AS builder
+# Use a specific, stable version of the base image for reproducibility.
+FROM python:3.12.3-slim-bookworm AS builder
 
-# Install build essentials for C extensions.
+# Set an environment variable for the venv path.
+ENV VENV_PATH=/opt/venv
+
+# Install build essentials for C extensions that some packages might need.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+# Create the virtual environment.
+RUN python3 -m venv $VENV_PATH
 
-# Install dependencies directly into the system site-packages.
+# Activate the venv for subsequent commands in this stage.
+ENV PATH="$VENV_PATH/bin:$PATH"
+
+# Upgrade pip within the venv.
+RUN pip install --no-cache-dir --upgrade pip
+
+# Copy only requirements to leverage layer caching.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+
+# Install dependencies into the venv.
+RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Stage 2: Runtime ---
-# Using the same base image ensures compatibility.
-FROM python:3.12-slim-bookworm
+FROM python:3.12.3-slim-bookworm
 
-# Create a non-root user for running the application.
+# Set the same venv path environment variable.
+ENV VENV_PATH=/opt/venv
+
+# Set the PATH to use the venv's executables.
+# This ensures 'uvicorn' and other commands are found.
+ENV PATH="$VENV_PATH/bin:$PATH"
+
+# Create a non-root user for security.
 RUN useradd --system --create-home --shell /bin/bash appuser
 WORKDIR /function
 
-# Copy the installed packages from the builder's system site-packages
-# to the runtime's system site-packages.
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-
-# Copy the executables (like uvicorn) from the builder's system bin
-# to the runtime's system bin.
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy the entire virtual environment from the builder stage.
+COPY --from=builder $VENV_PATH $VENV_PATH
 
 # Copy the application code.
 COPY main.py .
 
-# Set correct ownership.
+# Set correct ownership for the entire function directory.
 RUN chown -R appuser:appuser /function
 
 # Switch to the non-root user.
 USER appuser
 
-# Set environment variables. The PATH is already correct by default.
+# Set standard Python environment variables for containers.
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8080
 
-# The CMD can now be simple, as uvicorn is in the system PATH.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop"]
+# The CMD is now simple and robust. 'uvicorn' is found via the PATH.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop", "--workers", "1"]

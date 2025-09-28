@@ -1,3 +1,4 @@
+
 # main.py
 import base64
 import gzip
@@ -73,9 +74,10 @@ class Settings(pydantic_settings.BaseSettings):
     OCI_NAMESPACE: str
     model_config = pydantic_settings.SettingsConfigDict(extra='ignore')
 
-# --- 4. Core Logic Helpers ---
+# --- 4. Core Logic Helpers (Unchanged) ---
 db_engine: Engine | None = None
 
+# ... (All your _get_db_engine, _download_and_parse_payload, etc. functions go here, unchanged) ...
 def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
     global db_engine
     if db_engine is not None:
@@ -217,12 +219,18 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 log.error("Database transaction failed. Rolling back.", exc_info=True)
                 transaction.rollback()
                 raise
-
 # --- 5. FastAPI Application and Global Exception Handlers ---
-app = FastAPI(title="RAG Ingestor", version="2.0.4")
+app = FastAPI(
+    title="RAG Ingestor",
+    version="2.1.0",
+    docs_url=None, # Disable docs in production
+    redoc_url=None
+)
 
 @app.exception_handler(ConfigurationError)
 async def configuration_exception_handler(request: Request, exc: ConfigurationError):
+    # This assumes get_logger is available or we use the root logger
+    logger.critical(f"Configuration Error: {exc}", extra={'invocation_id': 'config_error'})
     return JSONResponse(
         status_code=500,
         content={"status": "error", "type": "configuration_error", "message": str(exc)},
@@ -230,19 +238,24 @@ async def configuration_exception_handler(request: Request, exc: ConfigurationEr
 
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
+    # This assumes get_logger is available or we use the root logger
+    logger.error(f"Value Error: {exc}", extra={'invocation_id': 'validation_error'})
     return JSONResponse(
         status_code=400,
         content={"status": "error", "type": "validation_error", "message": str(exc)},
     )
 
+# >>> CRITICAL ADDITION 1: Platform Health Check <<<
 @app.get("/")
 async def root_health_check():
     """
     Handles the OCI Functions platform health check.
     The platform sends a GET request to the invokeEndpoint to verify the container is ready.
+    This MUST exist and return a 200 OK for the function to be marked as healthy.
     """
     return {"status": "healthy", "message": "Health check passed"}
-    
+
+# This is your main invocation endpoint. It MUST be a POST to the root path.
 @app.post("/")
 async def handle_invocation(
     request: Request,
@@ -269,7 +282,7 @@ async def handle_invocation(
             raise ValueError("Event data is missing bucketName or resourceName.")
         log.info("Event parsed successfully.", extra={"bucket": bucket_name, "object": object_name})
 
-        # Step 3: Perform the core business logic (the expensive I/O operations)
+        # Step 3: Perform the core business logic
         engine = _get_db_engine(settings, log)
         payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
         _process_database_transaction(engine, payload, log)
@@ -282,9 +295,8 @@ async def handle_invocation(
             status_code=200
         )
 
-    except (ConfigurationError, ValueError):
-        # These are handled by the dedicated exception handlers above.
-        # Re-raising them allows the handlers to catch them.
+    except (ConfigurationError, ValueError) as e:
+        # Re-raise to be caught by the dedicated handlers
         raise
     except Exception as e:
         log.critical(f"An unhandled exception reached the top-level handler: {e}", exc_info=True)
@@ -293,11 +305,13 @@ async def handle_invocation(
             content={"status": "error", "type": "internal_server_error", "message": "An unexpected internal error occurred."},
         )
 
+# >>> CRITICAL ADDITION 2: General Health Check for monitoring <<<
 @app.get("/health")
 async def health_check():
+    """A general-purpose health check endpoint for external monitoring systems."""
     return {"status": "healthy", "service": "rag-ingestor", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
-# --- 6. Local Development Runner ---
+# --- 6. Local Development Runner (Unchanged) ---
 if __name__ == "__main__":
     import uvicorn
     print("--- Starting local development server on http://0.0.0.0:8080 ---")
