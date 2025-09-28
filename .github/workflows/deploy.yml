@@ -1,4 +1,4 @@
-#
+
 name: Build and Deploy to OCI Functions
 
 on:
@@ -42,11 +42,15 @@ jobs:
         push: true
         tags: ${{ env.FULL_IMAGE_NAME }}
 
-    # --- NEW STEP: Set up OCI CLI Config for Authentication ---
+    # --- THE FIX: Decode the Base64 private key ---
     - name: 6. Set up OCI CLI Config
       run: |
         mkdir -p ~/.oci
-        echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+        # Decode the Base64 secret back into the PEM file
+        echo "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
+        # Ensure the key file has the correct permissions
+        chmod 600 ~/.oci/oci_api_key.pem
+        
         cat <<EOF > ~/.oci/config
         [DEFAULT]
         user=${{ secrets.OCI_USER_OCID }}
