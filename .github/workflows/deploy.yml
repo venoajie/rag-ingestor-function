@@ -19,8 +19,6 @@ jobs:
         mkdir -p ~/.oci
         echo -n "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
         chmod 600 ~/.oci/oci_api_key.pem
-        
-        # Corrected 'giconfig' to 'config' and using 'vars' for region
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
@@ -51,7 +49,6 @@ jobs:
         fn use context oci-prod
         fn update context oracle.compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}"
         fn update context api-url "https://functions.${{ vars.OCI_REGION }}.oci.oraclecloud.com"
-        
         echo "--- Verifying OCI API Authentication ---"
         fn list apps
         echo "✅ OCI API Authentication Successful."
@@ -62,19 +59,23 @@ jobs:
         FUNCTION_NAME=$(grep '^name:' func.yaml | awk '{print $2}')
         FUNCTION_VERSION=$(grep '^version:' func.yaml | awk '{print $2}')
         APP_NAME="rag-app"
-        
         echo "FUNCTION_NAME=${FUNCTION_NAME}" >> $GITHUB_ENV
         echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
         echo "FULL_IMAGE_NAME=${{ vars.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${APP_NAME}/${FUNCTION_NAME}:${FUNCTION_VERSION}" >> $GITHUB_ENV
 
-    - name: 7. Build and push Docker image
+    - name: 7. Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: 8. Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
         push: true
         tags: ${{ env.FULL_IMAGE_NAME }}
+        # THE FINAL FIX: Explicitly command the build for AMD64.
+        platforms: linux/amd64
 
-    - name: 8. Update OCI Function
+    - name: 9. Update OCI Function
       run: |
         echo "Updating function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} with image tag ${{ env.FULL_IMAGE_NAME }}"
         fn update function ${{ env.APP_NAME }} ${{ env.FUNCTION_NAME }} --image "${{ env.FULL_IMAGE_NAME }}"
