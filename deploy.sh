@@ -1,11 +1,11 @@
 
 #!/bin/bash
 # ==============================================================================
-# 
-# RAG Ingestor - Hardened Deployment Script v3.2 (Parser Fix)
-#
-# FINAL VERSION (REVISED). Fixes the 'grep' command to correctly parse only
-# the 'version:' line from func.yaml, resolving the "invalid tag" error.
+# RAG Ingestor - Hardened Deployment Script v3.3 (Tooling Workaround)
+# FINAL VERSION (REVISED). The 'fn deploy --image' flag is not supported by the
+# installed CLI version. This script now uses the more fundamental
+# 'fn update function' command to point the function to the newly pushed image.
+# This bypasses the need for the newer deploy flag.
 # ==============================================================================
 
 # -e: Exit immediately if a command exits with a non-zero status.
@@ -27,8 +27,6 @@ export OCI_TENANCY_NAMESPACE="frpowqeyehes"
 export APP_NAME="rag-app"
 
 # --- Derived Values (DO NOT EDIT) ---
-# THE FIX: Make the grep patterns specific to avoid matching other lines.
-# We anchor the pattern to the start of the line with '^'.
 export FUNCTION_NAME=$(grep '^name:' func.yaml | awk '{print $2}')
 export FUNCTION_VERSION=$(grep '^version:' func.yaml | awk '{print $2}')
 export OCIR_REGISTRY="${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}/${APP_NAME}"
@@ -61,25 +59,26 @@ fn update context registry "${OCIR_REGISTRY}" >/dev/null
 echo "   ✅ Fn context configured."
 
 # ==============================================================================
-# STEP 5: Manually Build and Push the Correct Architecture (CACHE DISABLED)
+# STEP 5 & 6: Manually Build and Push (Unchanged)
 # ==============================================================================
 echo "➡️ Step 5/7: Building image for linux/amd64 from scratch (--no-cache)..."
 docker buildx build --no-cache --platform linux/amd64 -t "${FULL_IMAGE_NAME}" . --load
-
 echo "   ✅ Clean build complete."
+
 echo "➡️ Step 6/7: Pushing the correctly built image to OCIR..."
 docker push "${FULL_IMAGE_NAME}"
 echo "   ✅ Image pushed successfully."
 
 # ==============================================================================
-# STEP 7: Deploy Pre-Built Image
+# STEP 7: Update Function with the New Image
 # ==============================================================================
-echo "➡️ Step 7/7: Deploying the function using the clean, pre-built image..."
-fn --verbose deploy --app ${APP_NAME} --image "${FULL_IMAGE_NAME}"
+echo "➡️ Step 7/7: Updating the function to use the new pre-built image..."
+# THE FIX: Use 'fn update function' which is the correct command for this workflow.
+fn update function ${APP_NAME} ${FUNCTION_NAME} --image "${FULL_IMAGE_NAME}"
 
-echo "   ✅ Function deployed successfully."
+echo "   ✅ Function updated successfully."
 
 echo "--------------------------------------------------------------------------"
-echo "🚀 DEPLOYMENT SUCCEEDED. The parser bug is fixed. This should be the final run."
-echo "   Trigger the function and check the logs."
+echo "🚀 DEPLOYMENT SUCCEEDED. The tooling issue is resolved."
+echo "   Trigger the function and check the logs. We expect success."
 echo "--------------------------------------------------------------------------"
