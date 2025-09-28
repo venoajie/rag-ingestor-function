@@ -1,11 +1,7 @@
 
 #!/bin/bash
 # ==============================================================================
-# RAG Ingestor - Hardened Deployment Script v3.3 (Tooling Workaround)
-# FINAL VERSION (REVISED). The 'fn deploy --image' flag is not supported by the
-# installed CLI version. This script now uses the more fundamental
-# 'fn update function' command to point the function to the newly pushed image.
-# This bypasses the need for the newer deploy flag.
+# RAG Ingestor
 # ==============================================================================
 
 # -e: Exit immediately if a command exits with a non-zero status.
