@@ -20,11 +20,10 @@ jobs:
         echo -n "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
         chmod 600 ~/.oci/oci_api_key.pem
         
-        # THE FIX: Corrected 'giconfig' to 'config'
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-        echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+        echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/giconfig
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
 
@@ -55,16 +54,26 @@ jobs:
         echo "--- Testing OCI API Authentication ---"
         fn list apps
 
-    # --- The rest of the workflow will only run if all auth checks succeed ---
+    - name: 6. Parse func.yaml and set Image Name
+      id: parse_func
+      run: |
+        FUNCTION_NAME=$(grep '^name:' func.yaml | awk '{print $2}')
+        FUNCTION_VERSION=$(grep '^version:' func.yaml | awk '{print $2}')
+        APP_NAME="rag-app"
+        
+        echo "FUNCTION_NAME=${FUNCTION_NAME}" >> $GITHUB_ENV
+        echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
+        echo "FULL_IMAGE_NAME=${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${APP_NAME}/${FUNCTION_NAME}:${FUNCTION_VERSION}" >> $GITHUB_ENV
 
-    - name: 6. Build and push Docker image
-      id: build_and_push
+    - name: 7. Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
         push: true
-        tags: ${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/rag-app/rag-ingestor:latest
+        tags: ${{ env.FULL_IMAGE_NAME }}
 
-    - name: 7. Update OCI Function
+    - name: 8. Update OCI Function
       run: |
-        fn update function rag-app rag-ingestor --image ${{ steps.build_and_push.outputs.digest }}
+        echo "Updating function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} with image tag ${{ env.FULL_IMAGE_NAME }}"
+        # THE FIX: Use the full image name, not the digest.
+        fn update function ${{ env.APP_NAME }} ${{ env.FUNCTION_NAME }} --image "${{ env.FULL_IMAGE_NAME }}"
