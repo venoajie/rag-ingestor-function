@@ -1,11 +1,11 @@
 
 #!/bin/bash
 # ==============================================================================
-# RAG Ingestor - Hardened Deployment Script  v3.1 (Cache Invalidation)
-# FINAL VERSION. This adds '--no-cache' to the Docker build command.
-# This is the ultimate guarantee that no stale or incorrect-architecture
-# layers from previous local builds are being reused. The build will be
-# slower but 100% clean.
+# 
+# RAG Ingestor - Hardened Deployment Script v3.2 (Parser Fix)
+#
+# FINAL VERSION (REVISED). Fixes the 'grep' command to correctly parse only
+# the 'version:' line from func.yaml, resolving the "invalid tag" error.
 # ==============================================================================
 
 # -e: Exit immediately if a command exits with a non-zero status.
@@ -27,8 +27,10 @@ export OCI_TENANCY_NAMESPACE="frpowqeyehes"
 export APP_NAME="rag-app"
 
 # --- Derived Values (DO NOT EDIT) ---
-export FUNCTION_NAME=$(grep 'name:' func.yaml | awk '{print $2}')
-export FUNCTION_VERSION=$(grep 'version:' func.yaml | awk '{print $2}')
+# THE FIX: Make the grep patterns specific to avoid matching other lines.
+# We anchor the pattern to the start of the line with '^'.
+export FUNCTION_NAME=$(grep '^name:' func.yaml | awk '{print $2}')
+export FUNCTION_VERSION=$(grep '^version:' func.yaml | awk '{print $2}')
 export OCIR_REGISTRY="${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}/${APP_NAME}"
 export FULL_IMAGE_NAME="${OCIR_REGISTRY}/${FUNCTION_NAME}:${FUNCTION_VERSION}"
 
@@ -59,10 +61,9 @@ fn update context registry "${OCIR_REGISTRY}" >/dev/null
 echo "   ✅ Fn context configured."
 
 # ==============================================================================
-# NEW STEP 5: Manually Build and Push the Correct Architecture (CACHE DISABLED)
+# STEP 5: Manually Build and Push the Correct Architecture (CACHE DISABLED)
 # ==============================================================================
 echo "➡️ Step 5/7: Building image for linux/amd64 from scratch (--no-cache)..."
-# THE FINAL FIX: Adding '--no-cache' ensures a completely clean build.
 docker buildx build --no-cache --platform linux/amd64 -t "${FULL_IMAGE_NAME}" . --load
 
 echo "   ✅ Clean build complete."
@@ -71,7 +72,7 @@ docker push "${FULL_IMAGE_NAME}"
 echo "   ✅ Image pushed successfully."
 
 # ==============================================================================
-# UPDATED STEP 7: Deploy Pre-Built Image
+# STEP 7: Deploy Pre-Built Image
 # ==============================================================================
 echo "➡️ Step 7/7: Deploying the function using the clean, pre-built image..."
 fn --verbose deploy --app ${APP_NAME} --image "${FULL_IMAGE_NAME}"
@@ -79,6 +80,6 @@ fn --verbose deploy --app ${APP_NAME} --image "${FULL_IMAGE_NAME}"
 echo "   ✅ Function deployed successfully."
 
 echo "--------------------------------------------------------------------------"
-echo "🚀 DEPLOYMENT SUCCEEDED. The clean-built image has been deployed."
-echo "   Trigger the function and check the logs. This is our most rigorous attempt."
+echo "🚀 DEPLOYMENT SUCCEEDED. The parser bug is fixed. This should be the final run."
+echo "   Trigger the function and check the logs."
 echo "--------------------------------------------------------------------------"
