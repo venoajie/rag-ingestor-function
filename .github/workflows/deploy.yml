@@ -4,11 +4,11 @@ name: Build and Deploy to OCI Functions
 on:
   push:
     branches:
-      - main  # Or whatever your main branch is called
+      - main
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest # This is a native AMD64 machine
+    runs-on: ubuntu-latest
 
     steps:
     - name: 1. Check out repository
@@ -29,7 +29,7 @@ jobs:
       run: |
         FUNCTION_NAME=$(grep '^name:' func.yaml | awk '{print $2}')
         FUNCTION_VERSION=$(grep '^version:' func.yaml | awk '{print $2}')
-        APP_NAME="rag-app" # Set your app name here
+        APP_NAME="rag-app"
         
         echo "FUNCTION_NAME=${FUNCTION_NAME}" >> $GITHUB_ENV
         echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
@@ -41,27 +41,35 @@ jobs:
         context: .
         push: true
         tags: ${{ env.FULL_IMAGE_NAME }}
-        # No 'platform' flag needed, as we are building natively.
 
-    # --- CORRECTED FN CLI INSTALLATION ---
-    - name: 6. Set up Go
+    # --- NEW STEP: Set up OCI CLI Config for Authentication ---
+    - name: 6. Set up OCI CLI Config
+      run: |
+        mkdir -p ~/.oci
+        echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+        cat <<EOF > ~/.oci/config
+        [DEFAULT]
+        user=${{ secrets.OCI_USER_OCID }}
+        fingerprint=${{ secrets.OCI_FINGERPRINT }}
+        tenancy=${{ secrets.OCI_TENANCY_OCID }}
+        region=${{ secrets.OCI_REGION }}
+        key_file=~/.oci/oci_api_key.pem
+        EOF
+
+    - name: 7. Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21' # Use a version compatible with fn CLI
+        go-version: '1.21'
 
-    - name: 7. Build Fn CLI from source
+    - name: 8. Build Fn CLI from source
       run: |
-        echo "Cloning fn CLI repository..."
         git clone https://github.com/fnproject/cli.git
         cd cli
-        echo "Building fn CLI..."
         make build
-        echo "Moving fn binary to /usr/local/bin..."
         sudo mv fn /usr/local/bin/
-        echo "Verifying fn installation..."
         fn version
 
-    - name: 8. Configure Fn CLI Context
+    - name: 9. Configure Fn CLI Context
       run: |
         fn create context oci-prod --provider oracle
         fn use context oci-prod
@@ -69,6 +77,7 @@ jobs:
         fn update context api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com"
         fn update context registry "${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ env.APP_NAME }}"
 
-    - name: 9. Update OCI Function
+    - name: 10. Update OCI Function
       run: |
+        echo "Updating function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} with image ${{ env.FULL_IMAGE_NAME }}"
         fn update function ${{ env.APP_NAME }} ${{ env.FUNCTION_NAME }} --image "${{ env.FULL_IMAGE_NAME }}"
