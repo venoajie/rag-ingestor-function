@@ -13,7 +13,6 @@ jobs:
     steps:
     # ===================================================================
     # BLOCK 1: FAIL-FAST AUTHENTICATION SETUP & VERIFICATION
-    # All authentication and tooling setup happens here first.
     # ===================================================================
     - name: 1. Check out repository
       uses: actions/checkout@v4
@@ -21,11 +20,18 @@ jobs:
     - name: 2. Set up OCI CLI Config and Verify Private Key
       run: |
         mkdir -p ~/.oci
-        # Use 'echo -n' to prevent a trailing newline from corrupting the key
+        
+        # Decode the Base64 secret
         echo -n "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
         chmod 600 ~/.oci/oci_api_key.pem
         
-        # VERIFICATION: Use openssl to check the key's integrity. Fails job if invalid.
+        # FINAL SANITY CHECK: Ensure the key file is not empty.
+        if [ ! -s ~/.oci/oci_api_key.pem ]; then
+          echo "::error::FATAL: Decoded private key file is empty. The OCI_PRIVATE_KEY secret is likely incorrect or empty in GitHub."
+          exit 1
+        fi
+        
+        # VERIFICATION: Use openssl to check the key's integrity.
         echo "Verifying private key integrity..."
         openssl rsa -in ~/.oci/oci_api_key.pem -check -noout
         echo "Private key is valid."
@@ -56,7 +62,6 @@ jobs:
         fn use context oci-prod
         fn update context oracle.compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}"
         fn update context api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com"
-        # The registry context is needed for the 'fn update' command later
         fn update context registry "${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/rag-app"
 
     - name: 5. Verify OCI API Authentication (Fail-Fast Check)
@@ -66,8 +71,7 @@ jobs:
         echo "✅ OCI API authentication successful."
 
     # ===================================================================
-    # BLOCK 2: BUILD & PUSH ARTIFACT
-    # This only runs if the authentication block above succeeded.
+    # BLOCK 2 & 3: BUILD, PUSH, & DEPLOY
     # ===================================================================
     - name: 6. Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -97,10 +101,6 @@ jobs:
         push: true
         tags: ${{ env.FULL_IMAGE_NAME }}
 
-    # ===================================================================
-    # BLOCK 3: DEPLOY
-    # The final, quick step to update the function with the new image.
-    # ===================================================================
     - name: 10. Update OCI Function
       run: |
         echo "Updating function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} with image ${{ env.FULL_IMAGE_NAME }}"
