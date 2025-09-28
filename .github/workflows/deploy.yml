@@ -55,7 +55,7 @@ jobs:
         echo "--- Testing OCI API Authentication ---"
         fn list apps
 
-    # --- The rest of the workflow will only run if all auth checks succeed ---#
+    # --- The rest of the workflow will only run if all auth checks succeed ---
 
     - name: 6. Build and push Docker image
       id: build_and_push
