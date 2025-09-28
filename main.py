@@ -24,7 +24,7 @@ from sqlalchemy.sql import delete, insert
 from pgvector.sqlalchemy import Vector
 
 # --- 0. Application-Specific Constants ---
-VECTOR_DIMENSION = 1536
+VECTOR_DIMENSION = 1024
 
 # --- 1. Advanced Structured Logging (Unchanged) ---
 class JSONFormatter(logging.Formatter):
