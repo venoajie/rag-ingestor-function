@@ -20,17 +20,18 @@ jobs:
         echo -n "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
         chmod 600 ~/.oci/oci_api_key.pem
         
+        # Corrected 'giconfig' to 'config' and using 'vars' for region
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-        echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/giconfig
-        echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
+        echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+        echo "region=${{ vars.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
 
     - name: 3. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
-        registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
+        registry: ${{ vars.OCI_REGION_KEY }}.ocir.io
         username: ${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
@@ -44,15 +45,16 @@ jobs:
         make build
         sudo mv fn /usr/local/bin/
 
-    - name: 5. Configure and Test OCI API Authentication
+    - name: 5. Configure and Verify OCI API Authentication
       run: |
         fn create context oci-prod --provider oracle
         fn use context oci-prod
         fn update context oracle.compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}"
-        fn update context api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com"
+        fn update context api-url "https://functions.${{ vars.OCI_REGION }}.oci.oraclecloud.com"
         
-        echo "--- Testing OCI API Authentication ---"
+        echo "--- Verifying OCI API Authentication ---"
         fn list apps
+        echo "✅ OCI API Authentication Successful."
 
     - name: 6. Parse func.yaml and set Image Name
       id: parse_func
@@ -63,7 +65,7 @@ jobs:
         
         echo "FUNCTION_NAME=${FUNCTION_NAME}" >> $GITHUB_ENV
         echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
-        echo "FULL_IMAGE_NAME=${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${APP_NAME}/${FUNCTION_NAME}:${FUNCTION_VERSION}" >> $GITHUB_ENV
+        echo "FULL_IMAGE_NAME=${{ vars.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${APP_NAME}/${FUNCTION_NAME}:${FUNCTION_VERSION}" >> $GITHUB_ENV
 
     - name: 7. Build and push Docker image
       uses: docker/build-push-action@v5
@@ -75,5 +77,4 @@ jobs:
     - name: 8. Update OCI Function
       run: |
         echo "Updating function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} with image tag ${{ env.FULL_IMAGE_NAME }}"
-        # THE FIX: Use the full image name, not the digest.
         fn update function ${{ env.APP_NAME }} ${{ env.FUNCTION_NAME }} --image "${{ env.FULL_IMAGE_NAME }}"
