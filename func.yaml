@@ -2,11 +2,9 @@
 # func.yaml
 schema_version: 20180708
 name: rag-ingestor
-version: 2.0.4
+version: 2.0.5
 runtime: docker
 memory: 1024 # Increased to 1GB as a safer default for data processing.
 timeout: 120
-# 'cmd' is removed. The Dockerfile's CMD is now the single source of truth.
-#cmd: uvicorn main:app --host 0.0.0.0 --port 8080 --loop uvloop --workers 1 
 annotations:
   fn.oci.oracle.com/fn/invokeEndpoint: "/"
