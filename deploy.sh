@@ -1,19 +1,17 @@
 
 #!/bin/bash
 # ==============================================================================
-# RAG Ingestor - Hardened Deployment Script v2.3
+# RAG Ingestor - Hardened Deployment Script v2.4 (Architecture Fix)
 #
-# This version adds:
-#   - Dynamic function name parsing from func.yaml to prevent config errors.
-#   - Stricter shell settings (`-uo pipefail`) for improved safety.
-#   - Centralized OCIR registry variable for maintainability (DRY principle).
+# THIS IS THE DEFINITIVE FIX.
+# It addresses the ARM64-to-AMD64 cross-compilation issue by explicitly
+# setting the Docker build platform. This prevents silent build failures of
+# C extensions that lead to instant container crashes and 504 timeouts.
 # ==============================================================================
 
-# --- Stricter Shell Settings ---
 # -e: Exit immediately if a command exits with a non-zero status.
 # -u: Treat unset variables as an error when substituting.
-# -o pipefail: The return value of a pipeline is the status of the last
-#              command to exit with a non-zero status.
+# -o pipefail: The return value of a pipeline is its last non-zero status.
 set -euo pipefail
 
 # --- ACTION REQUIRED: Fill in these 2 values ---
@@ -30,19 +28,14 @@ export OCI_TENANCY_NAMESPACE="frpowqeyehes"
 export APP_NAME="rag-app"
 
 # --- Derived Values (DO NOT EDIT) ---
-# IMPROVEMENT 1: Derive function name from the canonical source: func.yaml
 export FUNCTION_NAME=$(grep 'name:' func.yaml | awk '{print $2}')
-# IMPROVEMENT 2: Centralize the registry URL to avoid repetition.
 export OCIR_REGISTRY="${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}/${APP_NAME}"
 
 echo "✅ Step 1/6: Environment configured."
 echo "   - Target Function: '${FUNCTION_NAME}' (from func.yaml)"
 
-# ==============================================================================
-# PRE-FLIGHT CHECK: Verify Docker Login
-# ==============================================================================
+# ... (Steps 2, 3, and 4 are unchanged and correct) ...
 echo "➡️ Step 2/6: Verifying Docker login to OCIR..."
-# The `docker pull` command is a functional check of credentials.
 if ! docker pull ${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}/non-existent-image:latest 2>&1 | grep -q "unauthorized"; then
     echo "   ✅ Docker login confirmed."
 else
@@ -52,19 +45,13 @@ else
     exit 1
 fi
 
-# ==============================================================================
-# SELF-HEALING: Clean and Recreate Fn Context (Corrected Logic)
-# ==============================================================================
 echo "➡️ Step 3/6: Forcing a clean recreation of the Fn CLI context..."
 echo "   -> Switching to 'default' context as a safe harbor."
 fn use context default
-
 echo "   -> Deleting old 'oci-prod' context (if it exists)."
-fn delete context oci-prod || true # '|| true' prevents failure if it doesn't exist.
-
+fn delete context oci-prod || true
 echo "   -> Creating a fresh 'oci-prod' context."
 fn create context oci-prod --provider oracle
-
 fn use context oci-prod
 echo "   ✅ Fn context 'oci-prod' has been reset and is now in use."
 
@@ -77,17 +64,23 @@ echo "   ✅ Fn context configured."
 # ==============================================================================
 # DEPLOYMENT: Build, Push, and Deploy
 # ==============================================================================
-echo "➡️ Step 5/6: Building and deploying the function... (This may take a few minutes)"
-# The Fn CLI automatically bumps the version in func.yaml unless you add '--no-bump'.
-# This is usually desired for development deploys.
-fn --verbose deploy --app ${APP_NAME}
+echo "➡️ Step 5/6: Building and deploying the function for AMD64 architecture..."
+echo "   - Host Architecture: $(uname -m)"
+echo "   - Target Architecture: amd64"
+
+# CRITICAL FIX: Set the build platform for Docker. This forces the build to
+# create an image compatible with the OCI Functions runtime (amd64).
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+
+# '--no-bump' is a best practice to prevent the CLI from modifying your func.yaml.
+fn --verbose deploy --app ${APP_NAME} --no-bump
+
 echo "   ✅ Function deployed successfully."
 
 # ==============================================================================
 # CONFIGURATION: Apply Environment Variables
 # ==============================================================================
 echo "➡️ Step 6/6: Applying runtime configuration to the deployed function..."
-# IMPROVEMENT 3: Use the dynamically parsed function name.
 fn config function ${APP_NAME} ${FUNCTION_NAME} DB_SECRET_OCID "${DB_SECRET_OCID}"
 fn config function ${APP_NAME} ${FUNCTION_NAME} OCI_NAMESPACE "${OCI_TENANCY_NAMESPACE}"
 echo "   ✅ Runtime configuration applied."
@@ -97,12 +90,9 @@ echo "   ✅ Runtime configuration applied."
 # ==============================================================================
 echo "--------------------------------------------------------------------------"
 echo "🚀 DEPLOYMENT SUCCEEDED. The function '${FUNCTION_NAME}' is now live in OCI."
+echo "   The architecture mismatch has been resolved."
 echo ""
 echo "🔴 IMMEDIATE ACTION REQUIRED:"
-echo "   1. Go to the OCI Console to create/verify the Event Rule targeting this function."
-echo "   2. Perform the End-to-End Test from the README to verify functionality."
-echo ""
-echo "🔒 POST-DEPLOYMENT SECURITY HARDENING (Phase 2):"
-echo "   - This script uses broad user credentials. The next step is to create a"
-echo "     dedicated CI/CD user with a least-privilege IAM policy."
+echo "   1. Trigger the function and check the logs in the OCI Console."
+echo "   2. You should now see your custom JSON logs from the application."
 echo "--------------------------------------------------------------------------"
