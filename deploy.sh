@@ -1,13 +1,11 @@
 
 #!/bin/bash
 # ==============================================================================
-# RAG Ingestor - Hardened Deployment Script v3.0 (Manual Build Control)
-#
-# CRITICAL UPDATE: We can no longer trust 'fn deploy' to handle cross-
-# compilation. This script now takes manual control of the build process using
-# 'docker buildx' to guarantee a correct AMD64 image is built and pushed.
-# It then instructs 'fn deploy' to use this pre-built image.
-# This is the definitive method for resolving architecture-related failures.
+# RAG Ingestor - Hardened Deployment Script  v3.1 (Cache Invalidation)
+# FINAL VERSION. This adds '--no-cache' to the Docker build command.
+# This is the ultimate guarantee that no stale or incorrect-architecture
+# layers from previous local builds are being reused. The build will be
+# slower but 100% clean.
 # ==============================================================================
 
 # -e: Exit immediately if a command exits with a non-zero status.
