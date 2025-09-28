@@ -14,7 +14,7 @@ jobs:
     - name: 1. Check out repository
       uses: actions/checkout@v4
 
-    - name: 2. Set up OCI CLI Config
+    - name: 2. Set up OCI API Config
       run: |
         mkdir -p ~/.oci
         echo -n "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
@@ -22,12 +22,21 @@ jobs:
         
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
-        echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+        echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/giconfig
         echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
 
-    - name: 3. Set up Go and Build Fn CLI
+    # --- MOVED UP: Test OCIR Authentication Early ---
+    - name: 3. Log in to OCI Container Registry (OCIR)
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
+        username: ${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_USERNAME }}
+        password: ${{ secrets.OCIR_AUTH_TOKEN }}
+    # The log for this step will show "Login Succeeded" on success.
+
+    - name: 4. Set up Go and Build Fn CLI
       uses: actions/setup-go@v5
       with:
         go-version: '1.21'
@@ -37,24 +46,18 @@ jobs:
         make build
         sudo mv fn /usr/local/bin/
 
-    - name: 4. Configure and Test Fn CLI
+    - name: 5. Configure and Test OCI API Authentication
       run: |
         fn create context oci-prod --provider oracle
         fn use context oci-prod
         fn update context oracle.compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}"
         fn update context api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com"
         
-        # This is the command that will fail if secrets are wrong
+        # This is the command that will fail if API secrets are wrong
+        echo "--- Testing OCI API Authentication ---"
         fn list apps
 
-    # --- The rest of the workflow will only run if 'fn list apps' succeeds ---
-
-    - name: 5. Log in to OCIR
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
-        username: ${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_USERNAME }}
-        password: ${{ secrets.OCIR_AUTH_TOKEN }}
+    # --- The rest of the workflow will only run if all auth checks succeed ---
 
     - name: 6. Build and push Docker image
       id: build_and_push
