@@ -72,10 +72,11 @@ jobs:
         context: .
         push: true
         tags: ${{ env.FULL_IMAGE_NAME }}
-        # THE FINAL FIX: Explicitly command the build for AMD64.
         platforms: linux/amd64
 
-    - name: 9. Update OCI Function
+    - name: 9. Deploy OCI Function (Create or Update)
       run: |
-        echo "Updating function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} with image tag ${{ env.FULL_IMAGE_NAME }}"
-        fn update function ${{ env.APP_NAME }} ${{ env.FUNCTION_NAME }} --image "${{ env.FULL_IMAGE_NAME }}"
+        echo "Deploying function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} using image ${{ env.FULL_IMAGE_NAME }}"
+        # The 'fn deploy' command is idempotent. It will create the function if it doesn't exist,
+        # or update it if it does. It automatically reads the configuration from func.yaml.
+        fn deploy --app ${{ env.APP_NAME }}
