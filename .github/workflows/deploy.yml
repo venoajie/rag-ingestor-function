@@ -14,22 +14,16 @@ jobs:
     - name: 1. Check out repository
       uses: actions/checkout@v4
 
-    - name: 2. Setup Python
+    - name: 2. Setup Python and Install OCI CLI
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
+    - run: pip install oci-cli
 
-    - name: 3. Install uv
-      run: pip install uv
-
-    - name: 4. Install OCI CLI (System-wide)
-      run: uv pip install --system oci-cli
-
-    - name: 5. Configure OCI CLI
+    - name: 3. Configure OCI CLI
       run: |
         mkdir -p ~/.oci
         echo -n "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
-        chmod 600 ~/.oci/oci_api_key.pem
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
@@ -38,25 +32,32 @@ jobs:
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
 
+    - name: 4. Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
-    - name: 6. Log in to OCI Container Registry (OCIR)
+    - name: 5. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
         registry: ${{ vars.OCI_REGION_KEY }}.ocir.io
         username: ${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
-    - name: 7. Build and Push Image with Raw Docker Commands
+    - name: 6. Build and Push Cross-Platform Image
       run: |
+        # This path is lowercase to satisfy the Docker client.
+        # The OCI backend will correctly map 'rag-project' to your 'RAG-Project' compartment.
         IMAGE_TAG="${{ vars.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/rag-project/rag-app/rag-ingestor:${{ github.sha }}"
-        echo "Building image with tag: $IMAGE_TAG"
-        docker build -t "$IMAGE_TAG" .
-        echo "Pushing image to OCIR..."
-        docker push "$IMAGE_TAG"
-        echo "✅ Image push successful!"
         echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ env.FULL_IMAGE_NAME }}
+        # This is the critical fix: Force the build for the AMD64 architecture
+        # that OCI Functions runs on.
+        platforms: linux/amd64
 
-    - name: 8. Create or Update OCI Function
+    - name: 7. Create or Update OCI Function
       run: |
         # This requires the OCI_FN_APP_OCID secret to be set in your GitHub repository.
         FUNCTION_OCID=$(oci fn function list --application-id ${{ secrets.OCI_FN_APP_OCID }} --display-name rag-ingestor --query "data[0].id" --raw-output || true)
