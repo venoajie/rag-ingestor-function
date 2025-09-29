@@ -14,16 +14,28 @@ jobs:
     - name: 1. Check out repository
       uses: actions/checkout@v4
 
-    - name: 2. Setup Python and uv
+    - name: 2. Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
-        cache: 'uv' # Use the modern, fast caching for uv
 
-    - name: 3. Install OCI CLI
+    - name: 3. Install and Configure uv
+      run: |
+        pip install uv
+        uv --version
+
+    - name: 4. Configure uv Cache (Manual, Proven Method)
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-${{ hashFiles('**/requirements.lock.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-
+
+    - name: 5. Install OCI CLI
       run: uv pip install oci-cli
 
-    - name: 4. Configure OCI CLI
+    - name: 6. Configure OCI CLI
       run: |
         mkdir -p ~/.oci
         echo -n "${{ secrets.OCI_PRIVATE_KEY }}" | base64 --decode > ~/.oci/oci_api_key.pem
@@ -31,18 +43,18 @@ jobs:
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-        echo "tenancy=${{ secrets.OCI_TENANCY_NAMESPACE }}" >> ~/.oci/config # Corrected to use the namespace secret for tenancy OCID
+        echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
         echo "region=${{ vars.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
 
-    - name: 5. Log in to OCI Container Registry (OCIR)
+    - name: 7. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
         registry: ${{ vars.OCI_REGION_KEY }}.ocir.io
         username: ${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
-    - name: 6. Build and Push Image with Raw Docker Commands
+    - name: 8. Build and Push Image with Raw Docker Commands
       run: |
         IMAGE_TAG="${{ vars.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/rag-app/rag-ingestor:${{ github.sha }}"
         echo "Building image with tag: $IMAGE_TAG"
@@ -52,7 +64,7 @@ jobs:
         echo "✅ Image push successful!"
         echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
 
-    - name: 7. Create or Update OCI Function
+    - name: 9. Create or Update OCI Function
       run: |
         # This requires the OCI_FN_APP_OCID secret to be set in your GitHub repository.
         FUNCTION_OCID=$(oci fn function list --app-id ${{ secrets.OCI_FN_APP_OCID }} --display-name rag-ingestor --query "data[0].id" --raw-output || true)
