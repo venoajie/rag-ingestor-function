@@ -42,12 +42,14 @@ jobs:
         username: ${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
-    - name: 6. Build and Push Cross-Platform Image
+    - name: 6. Set Image Tag Environment Variable
       run: |
         # This path is lowercase to satisfy the Docker client.
         # The OCI backend will correctly map 'rag-project' to your 'RAG-Project' compartment.
         IMAGE_TAG="${{ vars.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/rag-project/rag-app/rag-ingestor:${{ github.sha }}"
         echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
+
+    - name: 7. Build and Push Cross-Platform Image
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -57,7 +59,7 @@ jobs:
         # that OCI Functions runs on.
         platforms: linux/amd64
 
-    - name: 7. Create or Update OCI Function
+    - name: 8. Create or Update OCI Function
       run: |
         # This requires the OCI_FN_APP_OCID secret to be set in your GitHub repository.
         FUNCTION_OCID=$(oci fn function list --application-id ${{ secrets.OCI_FN_APP_OCID }} --display-name rag-ingestor --query "data[0].id" --raw-output || true)
