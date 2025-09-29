@@ -74,14 +74,19 @@ jobs:
         tags: ${{ env.FULL_IMAGE_NAME }}
         platforms: linux/amd64
 
-    - name: 9. Update func.yaml with full image name
+    - name: 9. Deploy OCI Function (Create or Update)
       run: |
-        # The -e flag enables interpretation of backslashes. \n ensures we start on a new line,
-        # preventing a YAML syntax error if the original file doesn't end with a newline.
-        echo -e "\nimage: ${{ env.FULL_IMAGE_NAME }}" >> func.yaml
-        echo "--- Updated func.yaml ---"
-        cat func.yaml
-        echo "-------------------------"
+        # Construct the registry prefix that 'fn' needs to build the full image path.
+        # This must match the path used in the 'docker/build-push-action' step.
+        REGISTRY_PREFIX="${{ vars.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ env.APP_NAME }}"
+        
+        echo "Deploying function with registry prefix: $REGISTRY_PREFIX"
+        
+        # The '--registry' flag tells 'fn' how to construct the full OCIR image path.
+        # The '--local' flag prevents 'fn' from trying to push the image itself.
+        # 'fn' will now correctly tell the OCI API to use the image:
+        # $REGISTRY_PREFIX/rag-ingestor:<version>
+        fn deploy --app ${{ env.APP_NAME }} --registry "$REGISTRY_PREFIX" --local
         
     - name: 10. Deploy OCI Function (using pre-built image)
       run: |
