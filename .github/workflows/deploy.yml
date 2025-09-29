@@ -76,12 +76,13 @@ jobs:
 
     - name: 9. Update func.yaml with full image name
       run: |
-        # This tells the 'fn' CLI exactly which pre-pushed image to use.
-        echo "image: ${{ env.FULL_IMAGE_NAME }}" >> func.yaml
+        # The -e flag enables interpretation of backslashes. \n ensures we start on a new line,
+        # preventing a YAML syntax error if the original file doesn't end with a newline.
+        echo -e "\nimage: ${{ env.FULL_IMAGE_NAME }}" >> func.yaml
         echo "--- Updated func.yaml ---"
         cat func.yaml
         echo "-------------------------"
-
+        
     - name: 10. Deploy OCI Function (using pre-built image)
       run: |
         echo "Deploying function from existing image: ${{ env.FULL_IMAGE_NAME }}"
