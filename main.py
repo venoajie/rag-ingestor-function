@@ -112,9 +112,27 @@ def initialize_dependencies():
         settings = Settings()
         app_settings = settings
     except pydantic.ValidationError as e:
-        raise ConfigurationError(f"Invalid configuration during startup: {e}") from e
+        raise ConfigurationError(f"Invalid configuration during startup: {e}") from e  
+    
+    startup_log.info("Attempting to initialize OCI signer using Resource Principals.")
+    try:
+        signer = oci.auth.signers.get_resource_principals_signer()
+        startup_log.info("Successfully initialized Resource Principals signer.")
+    except Exception as e:
+        # This is the critical debugging step. We dump the environment.
+        import os
+        env_vars = {k: v for k, v in os.environ.items() if "OCI" in k or "FN" in k}
+        startup_log.critical(
+            "FATAL: Failed to get Resource Principals signer. "
+            "This almost always means a networking (Service Gateway) or IAM (Dynamic Group/Policy) issue. "
+            f"Underlying error: {e}",
+            extra={"relevant_environment_variables": env_vars}
+        )
+        raise ConfigurationError(
+            "Could not authenticate with OCI Resource Principals. "
+            "Verify VCN Service Gateway and IAM policies."
+        ) from e
 
-    signer = oci.auth.signers.get_resource_principals_signer()
     object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
     
     max_retries = 3
