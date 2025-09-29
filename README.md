@@ -16,152 +16,30 @@ This function is a critical component of the RAG ecosystem. It is a serverless, 
 
 **Core Technology:** This function is implemented as a self-contained **FastAPI application** running in a custom Docker container.
 
-**Architectural Decision (PB-20250924-01):** The decision to bypass the official Oracle Python FDK (`fdk`) was made after a critical, unfixable build deadlock was discovered. The `fdk`'s dependency on `httptools==0.4.0` is fundamentally incompatible with the C-API of Python 3.11+. This "FDK-less" approach resolves the build deadlock, unlocks the use of modern Python versions, and improves local testability.
+**Architectural Decision (PB-20250924-01):The "FDK-less" Architecture** The decision to bypass the official Oracle Python FDK (`fdk`) was made after a critical, unfixable build deadlock was discovered. The `fdk`'s dependency on `httptools==0.4.0` is fundamentally incompatible with the C-API of Python 3.11+. This "FDK-less" approach resolves the build deadlock, unlocks the use of modern Python versions, and improves local testability.
+
 
 ## 2. Prerequisites
 
 Ensure you have the following tools installed and configured:
-1.  **OCI CLI:** Installed and configured (`oci setup config`).
-2.  **Docker:** Installed and running.
-3.  **Fn Project CLI:** Installed.
-4.  **jq:** A command-line JSON processor.
+- **OCI Resources:** A provisioned VCN with a private subnet, a PostgreSQL database, and an OCI Vault with a master key and a secret containing the database credentials.
+- **GitHub Repository:** This repository must have the required secrets and variables configured for the CI/CD pipeline (see `deploy.yml`).
 
 ---
 
-## 3. Step-by-Step Deployment Guide
+## 3. Canonical Deployment Method: CI/CD
 
-This guide is designed to be executed as a script.
+**Manual deployment of this function is explicitly forbidden.** All deployments **MUST** be performed via the GitHub Actions workflow defined in `.github/workflows/deploy.yml`.
 
-### Phase 0: Environment Setup
+This policy is in place to prevent critical, hard-to-diagnose runtime failures caused by:
+1.  **CPU Architecture Mismatch:** Building on an ARM64 machine (like Apple Silicon or OCI Ampere) for the AMD64 OCI Functions platform leads to `exec format error` crashes. The CI/CD pipeline builds on a native AMD64 runner, eliminating this risk.
+2.  **Local Environment Drift:** Differences in local Docker, Python, or CLI versions can produce non-viable artifacts. The CI/CD pipeline provides a clean, consistent, and repeatable build environment.
 
-Execute this block first to set up all necessary variables for your shell session.
+### Deployment Procedure
 
-```bash
-# --- Set these variables with your specific OCI details ---
-export TENANCY_OCID="<YOUR_TENANCY_OCID>"
-export COMPARTMENT_ID="<YOUR_COMPARTMENT_OCID>"
-export SUBNET_ID="<YOUR_SUBNET_ID_FOR_THE_FUNCTION>"
-export DB_SECRET_OCID="<YOUR_DB_CONNECTION_SECRET_OCID>"
-export VAULT_KEY_OCID="<YOUR_VAULT_MASTER_ENCRYPTION_KEY_OCID>"
-
-# --- These names are defined by the architecture ---
-export APP_NAME="rag-ecosystem-app"
-export FUNCTION_NAME="rag-ingestor"
-export BUCKET_NAME="rag-codebase-inbox"
-export DYNAMIC_GROUP_NAME="RAGIngestorFunctionDynamicGroup"
-
-# --- Set these variables for Docker and Fn CLI login ---
-export OCI_REGION="<your_oci_region_e.g.,_eu-frankfurt-1>"
-export OCI_REGION_KEY="<your_oci_region_key_e.g.,_fra>"
-export OCI_TENANCY_NAMESPACE="<your_tenancy_object_storage_namespace>"
-export OCI_USERNAME="<your_oci_username_for_docker_login>"
-```
-
-### Phase 1: Provision Core Infrastructure
-
-These commands create the bucket and the Functions Application that will host our code. They are idempotent; running them again will not cause errors if the resources already exist.
-
-```bash
-# 1.1. Create the Object Storage "Inbox" Bucket
-echo "Creating Object Storage bucket: $BUCKET_NAME..."
-oci os bucket create \
-  --compartment-id $COMPARTMENT_ID \
-  --name $BUCKET_NAME \
-  --object-events-enabled true
-
-# 1.2. Create the OCI Function Application
-echo "Creating Functions Application: $APP_NAME..."
-oci fn application create \
-  --compartment-id $COMPARTMENT_ID \
-  --display-name $APP_NAME \
-  --subnet-ids "[\"$SUBNET_ID\"]"
-```
-
-### Phase 2: Configure Permissions & Networking (IAM)
-
-This is the most critical phase. These policies grant all necessary permissions for the system to operate.
-
-```bash
-# 2.1. Create the IAM Dynamic Group for the Function
-# This group identifies our function so we can grant it permissions.
-echo "Creating Dynamic Group: $DYNAMIC_GROUP_NAME..."
-oci iam dynamic-group create \
-  --name "$DYNAMIC_GROUP_NAME" \
-  --description "Dynamic group for all functions in the RAG application compartment" \
-  --matching-rule "ALL {resource.type = 'fnfunc', resource.compartment.id = '$COMPARTMENT_ID'}"
-
-# 2.2. Create the Function's Core Permissions Policy
-# This policy MUST be created in the ROOT compartment (tenancy) to correctly
-# reference the dynamic group and grant it permissions on resources in your project compartment.
-echo "Creating Function Permissions Policy in ROOT compartment..."
-printf '[
-  "Allow dynamic-group %s to read secret-bundles in compartment id %s where target.secret.id = ''%s''",
-  "Allow dynamic-group %s to use keys in compartment id %s where target.key.id = ''%s''",
-  "Allow dynamic-group %s to read objects in compartment id %s where target.bucket.name = ''%s''",
-  "Allow dynamic-group %s to use virtual-network-family in compartment id %s"
-]' "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" "${DB_SECRET_OCID}" "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" "${VAULT_KEY_OCID}" "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" "${BUCKET_NAME}" "$DYNAMIC_GROUP_NAME" "${COMPARTMENT_ID}" > /tmp/statements.json
-
-oci iam policy create \
-  --compartment-id "${TENANCY_OCID}" \
-  --name "RAGIngestorFunctionPermissionsPolicy" \
-  --description "Grants RAG Ingestor function permissions to decrypt secrets, read objects, and use the VCN." \
-  --statements file:///tmp/statements.json
-
-# 2.3. Create the Event Service Invocation Policy
-# This allows the OCI Events service to invoke your function.
-echo "Creating Event Service Invocation Policy..."
-printf '["Allow service events to use fn-function in compartment id %s"]' "${COMPARTMENT_ID}" > /tmp/statements.json
-
-oci iam policy create \
-  --compartment-id "${COMPARTMENT_ID}" \
-  --name "PlatformEventsToFunctionInvokePolicy" \
-  --description "Allows the OCI Events service to invoke functions within this compartment." \
-  --statements file:///tmp/statements.json
-
-rm /tmp/statements.json
-```
-
-### Phase 3: Deploy and Configure the Function
-
-```bash
-# 3.1. Log in to OCI Container Registry (OCIR)
-# Get an Auth Token from your OCI user profile page (Profile -> Auth Tokens).
-echo "<YOUR_AUTH_TOKEN>" | docker login ${OCI_REGION_KEY}.ocir.io -u ${OCI_TENANCY_NAMESPACE}/${OCI_USERNAME} --password-stdin
-
-# 3.2. Configure the Fn CLI Context
-fn create context oci-prod --provider oracle
-fn use context oci-prod
-fn update context oracle.compartment-id "${COMPARTMENT_ID}"
-fn update context api-url "https://functions.${OCI_REGION}.oci.oraclecloud.com"
-fn update context registry "${OCI_REGION_KEY}.ocir.io/${OCI_TENANCY_NAMESPACE}"
-
-# 3.3. Deploy the function
-# The fn CLI will read func.yaml, build the Dockerfile, push to OCIR, and create the function.
-fn -v deploy --app ${APP_NAME}
-
-# 3.4. Configure the function with its required environment variables
-fn config function ${APP_NAME} ${FUNCTION_NAME} DB_SECRET_OCID "${DB_SECRET_OCID}"
-fn config function ${APP_NAME} ${FUNCTION_NAME} OCI_NAMESPACE "${OCI_TENANCY_NAMESPACE}"
-```
-
-### Phase 4: Create the Event Rule Trigger
-
-Using the UI is the most reliable method for this step.
-1.  In the OCI Console, navigate to **Observability & Management -> Events Service -> Rules**.
-2.  Click **Create Rule**.
-3.  **Rule Conditions:**
-    *   **Condition:** `Event Type`
-    *   **Service Name:** `Object Storage`
-    *   **Event Type:** `Object - Create`
-    *   **Attribute:** `bucketName` = `rag-codebase-inbox`
-4.  **Actions:**
-    *   **Action Type:** `Functions`
-    *   Select your compartment, `${APP_NAME}` application, and `${FUNCTION_NAME}` function.
-5.  Click **Create Rule**.
-
-**Deployment is now complete and the system is LIVE.**
-
----
+1.  **Make Code Changes:** Modify the `main.py` or other source files as needed.
+2.  **Bump the Version:** **This is a mandatory step.** Before committing, increment the `version` number in `func.yaml`. This forces the OCI Functions platform to pull the new container image. Failure to do so will result in a "no-op" deployment where the old code continues to run.
+3.  **Commit and Push:** Push your changes to the `main` branch. The GitHub Actions workflow will automatically build, push, and update the function.---
 
 ## 4. Operations and Troubleshooting
 
@@ -184,7 +62,46 @@ Using the UI is the most reliable method for this step.
 
 ### **Proactive Troubleshooting: The Diagnostic Flow**
 
-If the end-to-end test fails, follow this battle-tested diagnostic flow.
+
+### End-to-End Test
+
+1.  **Trigger the upstream CI/CD pipeline** (`smart-indexing.yml`) in a project repository. This will generate and upload a data payload to the `${BUCKET_NAME}`.
+2.  **Monitor the function logs** in the OCI Console. A successful run will show a series of JSON logs, starting with `Function invocation started.` and ending with `Function invocation completed successfully.`.
+3.  **Verify the data** in the PostgreSQL database.
+
+### **Proactive Troubleshooting: The Battle-Tested Diagnostic Flow**
+
+If an invocation fails, follow this diagnostic flow. The primary symptom will almost always be a `504 - FunctionInvokeContainerInitTimeout` error in the logs.
+
+**CRITICAL LESSON LEARNED:** 
+The `504` error is a generic, misleading symptom. It rarely means a true timeout. It almost always means the **container crashed instantly**, and the platform timed out while waiting for a response that would never come.
+
+**Step 1: Check the Function Logs for ANY Output**
+
+Go to the function's logs in the OCI Console. What do you see for the failed invocation?
+
+*   **Case A: The logs are completely empty.**
+    *   **Diagnosis:** Catastrophic container crash *before* the web server can start.
+    *   **Cause:** A top-level syntax error in `main.py` (e.g., a typo, bad indentation). The Python interpreter fails the moment it tries to load the module.
+    *   **Action:** Carefully review your recent code changes for syntax errors. Test the container locally with `docker run ...` to capture the traceback that OCI is hiding.
+
+*   **Case B: You see the canary (`--- RAG INGESTOR ... DEPLOYED ---`) and Uvicorn startup messages, but NO custom JSON logs.**
+    *   **Diagnosis:** The container started successfully but crashed during the processing of the invocation request, before the first line of your handler code.
+    *   **Most Likely Cause:** A **data contract mismatch**. The payload received from Object Storage is in a format the function cannot handle.
+    *   **Primary Suspect:** **Vector Dimension Mismatch.** Check the `embedding_dim` in the logs of the upstream `smart-indexing` workflow. It **MUST** match the `VECTOR_DIMENSION` constant in this function's `main.py`.
+    *   **Action:** Align the `VECTOR_DIMENSION` in `main.py`, bump the version in `func.yaml`, and redeploy.
+
+*   **Case C: You see your custom JSON logs, including a "CRITICAL" level log with an exception.**
+    *   **Diagnosis:** The function's core logic is failing. This is the "easiest" problem to solve.
+    *   **Action:** Copy the `invocation_id` from the log. Filter the logs by this ID. Examine the `"exception"` object in the critical log. The `"type"` and `"message"` will tell you exactly what went wrong (e.g., `OperationalError: connection timed out`, `ValueError: Table does not exist...`). This points to a problem with the database, networking, or the content of the payload itself.
+
+*   **Case D: You see NO new logs at all after the trigger event.**
+    *   **Diagnosis:** The function is **not being invoked**.
+    *   **Action:**
+        1.  **Check the Event Rule:** Verify it is **Active** and the conditions (bucketName, etc.) are correct.
+        2.  **Check VCN Networking:** This is a common cause. Ensure the function's subnet has a **Route Table** with a rule for `All ... Services in Oracle Services Network` pointing to a **Service Gateway**.
+
+Non-`504` error:
 
 **Step 1: Check the Function Logs (The Function's Story)**
 
