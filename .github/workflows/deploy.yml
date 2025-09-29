@@ -36,6 +36,8 @@ jobs:
         echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
         echo "region=${{ vars.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+        chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
+
 
     - name: 6. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
@@ -57,7 +59,7 @@ jobs:
     - name: 8. Create or Update OCI Function
       run: |
         # This requires the OCI_FN_APP_OCID secret to be set in your GitHub repository.
-        FUNCTION_OCID=$(oci fn function list --app-id ${{ secrets.OCI_FN_APP_OCID }} --display-name rag-ingestor --query "data[0].id" --raw-output || true)
+        FUNCTION_OCID=$(oci fn function list --application-id ${{ secrets.OCI_FN_APP_OCID }} --display-name rag-ingestor --query "data[0].id" --raw-output || true)
         
         if [ -z "$FUNCTION_OCID" ]; then
           echo "Function 'rag-ingestor' not found. Creating it..."
