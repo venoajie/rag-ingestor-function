@@ -7,4 +7,5 @@ runtime: docker
 memory: 1024 # Increased to 1GB as a safer default for data processing.
 timeout: 120
 annotations:
-  fn.oci.oracle.com/fn/invokeEndpoint: "/"
+  fn.oci.oracle.com/fn/invokeEndpoint: "/"M
+  oracle.com/oci/auth/principal: "dynamic_group"
