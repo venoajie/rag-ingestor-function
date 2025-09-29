@@ -1,8 +1,8 @@
-
 # func.yaml
+
 schema_version: 20180708
 name: rag-ingestor
-version: 2.0.7
+version: 2.0.8
 runtime: docker
 memory: 1024 # Increased to 1GB as a safer default for data processing.
 timeout: 120
