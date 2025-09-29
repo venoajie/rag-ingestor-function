@@ -233,17 +233,18 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
 # --- 5. FastAPI Application ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("--- RAG INGESTOR v2.2 (Hardened) LIFESPAN START ---")
+    startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
+    startup_log.info("--- RAG INGESTOR v2.2 (Hardened) LIFESPAN START ---")
     try:
         initialize_dependencies()
-        print("--- ALL DEPENDENCIES INITIALIZED SUCCESSFULLY ---")
+        startup_log.info("--- ALL DEPENDENCIES INITIALIZED SUCCESSFULLY ---")
     except Exception as e:
-        print(f"FATAL: Could not initialize dependencies during startup. Error: {e}")
+        startup_log.critical(f"FATAL: Could not initialize dependencies during startup. Error: {e}", exc_info=True)
         raise
     yield
     if db_engine:
         db_engine.dispose()
-        print("--- DATABASE CONNECTION POOL CLOSED ---")
+        startup_log.info("--- DATABASE CONNECTION POOL CLOSED ---")
 
 app = FastAPI(title="RAG Ingestor", version="2.2.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 
