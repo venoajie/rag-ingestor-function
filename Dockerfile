@@ -1,3 +1,5 @@
+# Dockerfile
+
 # --- Stage 1: Builder ---
 # Use a specific, stable version of the base image for reproducibility.
 FROM python:3.12.3-slim-bookworm AS builder
