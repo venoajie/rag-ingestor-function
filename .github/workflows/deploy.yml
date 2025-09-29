@@ -85,6 +85,7 @@ jobs:
     - name: 10. Deploy OCI Function (using pre-built image)
       run: |
         echo "Deploying function from existing image: ${{ env.FULL_IMAGE_NAME }}"
-        # The '--no-build' flag tells 'fn deploy' to skip its internal build/push
-        # and use the image specified in func.yaml.
-        fn deploy --app ${{ env.APP_NAME }} --no-build
+        # The '--local' flag is the equivalent of '--no-build' for this older fn CLI version.
+        # It skips the push step, and the 'image:' key in func.yaml ensures the correct,
+        # pre-pushed image is used for the deployment.
+        fn deploy --app ${{ env.APP_NAME }} --local
