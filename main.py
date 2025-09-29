@@ -1,5 +1,5 @@
 
-# main.py
+# main.py - v2.2 (Hardened)
 import base64
 import gzip
 import io
@@ -14,10 +14,12 @@ from datetime import datetime
 from typing import Annotated
 
 import oci
+import oci.exceptions
 import pydantic
 import pydantic_settings
-from fastapi import FastAPI, Request, Depends, Header
+from fastapi import FastAPI, Request, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
+from oci.retry import RetryStrategyBuilder
 from sqlalchemy import create_engine, text, exc, Table, MetaData, Column, values, column
 from sqlalchemy.engine import Engine
 from sqlalchemy.dialects.postgresql import JSONB, TEXT, UUID as PG_UUID
@@ -25,9 +27,9 @@ from sqlalchemy.sql import delete, insert
 from pgvector.sqlalchemy import Vector
 
 # --- 0. Application-Specific Constants ---
-VECTOR_DIMENSION = 1024 # This is the corrected dimension
+VECTOR_DIMENSION = 1024
 
-# --- 1. Advanced Structured Logging ---
+# --- 1. Advanced Structured Logging (No changes) ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
         log_record = {
@@ -57,12 +59,12 @@ handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
 logger.propagate = False
 
-# --- 2. Context-Aware Logging with FastAPI Dependency Injection ---
+# --- 2. Context-Aware Logging (No changes) ---
 def get_logger(fn_invoke_id: Annotated[str | None, Header(alias="fn-invoke-id")] = None) -> logging.LoggerAdapter:
     invocation_id = fn_invoke_id or str(uuid.uuid4())
     return logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
 
-# --- 3. Strict Configuration and Custom Exceptions ---
+# --- 3. Strict Configuration (No changes) ---
 class ConfigurationError(Exception): pass
 class DbSecret(pydantic.BaseModel):
     username: str
@@ -76,61 +78,87 @@ class Settings(pydantic_settings.BaseSettings):
     model_config = pydantic_settings.SettingsConfigDict(extra='ignore')
 
 # --- 4. Core Logic Helpers ---
+# Globals to be initialized at startup
 db_engine: Engine | None = None
+object_storage_client: oci.object_storage.ObjectStorageClient | None = None
+app_settings: Settings | None = None
 
-def _get_db_engine(settings: Settings, log: logging.LoggerAdapter) -> Engine:
-    global db_engine
-    if db_engine is not None:
-        try:
-            with db_engine.connect() as connection:
-                connection.execute(text("SELECT 1"))
-            log.info("Reusing existing, healthy database engine.")
-            return db_engine
-        except exc.OperationalError as e:
-            log.warning(f"Stale connection detected. Recreating engine. Error: {e}")
-            db_engine = None
+# REFINEMENT: Define a standard, reusable retry strategy for all OCI clients.
+standard_retry_strategy = RetryStrategyBuilder().add_max_attempts(4).get_retry_strategy()
+
+def get_db_engine() -> Engine:
+    if db_engine is None:
+        logger.critical("Database engine is not initialized.")
+        raise HTTPException(status_code=503, detail="Service Unavailable: Database connection is not ready.")
+    return db_engine
+
+def get_os_client() -> oci.object_storage.ObjectStorageClient:
+    if object_storage_client is None:
+        logger.critical("Object Storage client is not initialized.")
+        raise HTTPException(status_code=503, detail="Service Unavailable: Object Storage client is not ready.")
+    return object_storage_client
+
+def get_settings() -> Settings:
+    if app_settings is None:
+        logger.critical("Application settings are not initialized.")
+        raise HTTPException(status_code=503, detail="Service Unavailable: Application settings are not ready.")
+    return app_settings
+
+def initialize_dependencies():
+    global db_engine, object_storage_client, app_settings
+    startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
+    
+    try:
+        settings = Settings()
+        app_settings = settings
+    except pydantic.ValidationError as e:
+        raise ConfigurationError(f"Invalid configuration during startup: {e}") from e
+
+    signer = oci.auth.signers.get_resource_principals_signer()
+    object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            log.info(f"Initializing database engine (attempt {attempt + 1}/{max_retries}).")
-            signer = oci.auth.signers.get_resource_principals_signer()
-            secrets_client = oci.secrets.SecretsClient(config={}, signer=signer)
-            log.info("Fetching secret from Vault.", extra={"secret_ocid": settings.DB_SECRET_OCID})
+            startup_log.info(f"Initializing database engine (attempt {attempt + 1}/{max_retries}).")
+            secrets_client = oci.secrets.SecretsClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
             secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
-            secret_content_base64 = secret_bundle.data.secret_bundle_content.content
-            decoded_bytes = base64.b64decode(secret_content_base64)
-            secret_content = decoded_bytes.decode('utf-8')
-            db_secret_data = json.loads(secret_content)
-            db_config = DbSecret.model_validate(db_secret_data)
-            db_connection_string = (f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}@{db_config.host}:{db_config.port}/{db_config.dbname}")
-            db_engine = create_engine(db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800, connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"})
-            with db_engine.connect() as connection:
+            secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
+            db_config = DbSecret.model_validate(json.loads(secret_content))
+            db_connection_string = f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}@{db_config.host}:{db_config.port}/{db_config.dbname}"
+            engine = create_engine(db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800, connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"})
+            with engine.connect() as connection:
                 db_version = connection.execute(text("SELECT version()")).scalar()
-            log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
-            return db_engine
+            startup_log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
+            db_engine = engine
+            return
         except Exception as e:
-            log.error(f"Failed to initialize database engine on attempt {attempt + 1}: {e}", exc_info=True)
+            startup_log.error(f"Failed to initialize database engine on attempt {attempt + 1}: {e}", exc_info=True)
             if attempt < max_retries - 1:
-                sleep_time = (2 ** attempt)
-                log.info(f"Retrying in {sleep_time} seconds...")
-                time.sleep(sleep_time)
+                time.sleep(2 ** attempt)
             else:
-                log.critical("All attempts to initialize database engine failed.")
+                startup_log.critical("All attempts to initialize database engine failed during startup.")
                 raise
 
-def _download_and_parse_payload(settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
+def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClient, settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
-        signer = oci.auth.signers.get_resource_principals_signer()
-        object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer)
-        get_obj = object_storage_client.get_object(settings.OCI_NAMESPACE, bucket_name, object_name)
+        get_obj = os_client.get_object(settings.OCI_NAMESPACE, bucket_name, object_name)
         with gzip.GzipFile(fileobj=io.BytesIO(get_obj.data.content), mode='rb') as gz_file:
             payload = json.load(gz_file)
         log.info("Successfully downloaded and parsed payload.")
         return payload
-    except Exception as e:
-        log.error(f"Failed to download or parse payload for object '{object_name}'.", exc_info=True)
+    except oci.exceptions.ServiceError as e:
+        if e.status == 404:
+            log.error(f"Object '{object_name}' not found in bucket '{bucket_name}'.", exc_info=True)
+            raise ValueError(f"Source object not found: {object_name}") from e
+        log.error(f"An OCI Service Error occurred while downloading '{object_name}'.", exc_info=True)
         raise
+    except json.JSONDecodeError as e:
+        log.error(f"Failed to parse JSON from object '{object_name}'. The file may be corrupted.", exc_info=True)
+        raise ValueError(f"Invalid JSON in source object: {object_name}") from e
+
+# _validate_table_exists and _process_database_transaction remain unchanged
 
 def _validate_table_exists(connection: 'Connection', table_name: str, log: logging.LoggerAdapter):
     if not re.match(r'^codebase_collection_[a-zA-Z0-9_]+$', table_name):
@@ -185,22 +213,23 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
                 raise
 
 # --- 5. FastAPI Application ---
-
-# THE SAFER CANARY: Use a lifespan context manager for startup events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # This code runs on startup
-    print("--- RAG INGESTOR v2.0 (dim=1024) DEPLOYED ---")
+    print("--- RAG INGESTOR v2.2 (Hardened) LIFESPAN START ---")
+    try:
+        initialize_dependencies()
+        print("--- ALL DEPENDENCIES INITIALIZED SUCCESSFULLY ---")
+    except Exception as e:
+        print(f"FATAL: Could not initialize dependencies during startup. Error: {e}")
+        raise
     yield
+    if db_engine:
+        db_engine.dispose()
+        print("--- DATABASE CONNECTION POOL CLOSED ---")
 
-app = FastAPI(
-    title="RAG Ingestor",
-    version="2.1.0",
-    docs_url=None,
-    redoc_url=None,
-    lifespan=lifespan
-)
+app = FastAPI(title="RAG Ingestor", version="2.2.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 
+# Exception handlers remain unchanged
 @app.exception_handler(ConfigurationError)
 async def configuration_exception_handler(request: Request, exc: ConfigurationError):
     logger.critical(f"Configuration Error: {exc}", extra={'invocation_id': 'config_error'})
@@ -216,13 +245,15 @@ async def root_health_check():
     return {"status": "healthy", "message": "Health check passed"}
 
 @app.post("/")
-async def handle_invocation(request: Request, log: logging.LoggerAdapter = Depends(get_logger)):
+async def handle_invocation(
+    request: Request,
+    log: logging.LoggerAdapter = Depends(get_logger),
+    settings: Settings = Depends(get_settings),
+    engine: Engine = Depends(get_db_engine),
+    os_client: oci.object_storage.ObjectStorageClient = Depends(get_os_client)
+):
     log.info("Function invocation started.")
     try:
-        try:
-            settings = Settings()
-        except pydantic.ValidationError as e:
-            raise ConfigurationError(f"Invalid configuration: {e}") from e
         body_bytes = await request.body()
         if not body_bytes:
             raise ValueError("Received empty event payload.")
@@ -233,9 +264,10 @@ async def handle_invocation(request: Request, log: logging.LoggerAdapter = Depen
         if not bucket_name or not object_name:
             raise ValueError("Event data is missing bucketName or resourceName.")
         log.info("Event parsed successfully.", extra={"bucket": bucket_name, "object": object_name})
-        engine = _get_db_engine(settings, log)
-        payload = _download_and_parse_payload(settings, bucket_name, object_name, log)
+        
+        payload = _download_and_parse_payload(os_client, settings, bucket_name, object_name, log)
         _process_database_transaction(engine, payload, log)
+        
         invocation_id = log.extra['invocation_id']
         log.info("Function invocation completed successfully.")
         return JSONResponse(content={"status": "success", "message": f"Processed {object_name} successfully.", "invocation_id": invocation_id}, status_code=200)
