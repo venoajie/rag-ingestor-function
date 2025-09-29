@@ -74,9 +74,17 @@ jobs:
         tags: ${{ env.FULL_IMAGE_NAME }}
         platforms: linux/amd64
 
-    - name: 9. Deploy OCI Function (Create or Update)
+    - name: 9. Update func.yaml with full image name
       run: |
-        echo "Deploying function ${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }} using image ${{ env.FULL_IMAGE_NAME }}"
-        # The 'fn deploy' command is idempotent. It will create the function if it doesn't exist,
-        # or update it if it does. It automatically reads the configuration from func.yaml.
-        fn deploy --app ${{ env.APP_NAME }}
+        # This tells the 'fn' CLI exactly which pre-pushed image to use.
+        echo "image: ${{ env.FULL_IMAGE_NAME }}" >> func.yaml
+        echo "--- Updated func.yaml ---"
+        cat func.yaml
+        echo "-------------------------"
+
+    - name: 10. Deploy OCI Function (using pre-built image)
+      run: |
+        echo "Deploying function from existing image: ${{ env.FULL_IMAGE_NAME }}"
+        # The '--no-build' flag tells 'fn deploy' to skip its internal build/push
+        # and use the image specified in func.yaml.
+        fn deploy --app ${{ env.APP_NAME }} --no-build
