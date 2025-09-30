@@ -111,8 +111,49 @@ def initialize_dependencies():
     try:
         settings = Settings()
         app_settings = settings
+        
+        
+        # --- DEBUG-ENHANCEMENT 1: Log loaded settings for clarity ---
+        startup_log.info("Application settings loaded.", extra={
+            "DB_SECRET_OCID": settings.DB_SECRET_OCID,
+            "OCI_NAMESPACE": settings.OCI_NAMESPACE
+        })
+        
     except pydantic.ValidationError as e:
         raise ConfigurationError(f"Invalid configuration during startup: {e}") from e  
+    
+    
+    # --- START TEMPORARY MODIFICATION ---
+    signer = None
+    oci_config = {}
+    oci_config_b64 = os.getenv("OCI_CONFIG_B64")
+
+    if oci_config_b64:
+        startup_log.warning("Using temporary user principal auth from OCI_CONFIG_B64.")
+        config_content = base64.b64decode(oci_config_b64).decode('utf-8')
+        config_json = json.loads(config_content)
+        
+        # The OCI SDK needs the key as a file, so we write it temporarily
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
+            key_file.write(config_json["key_content"])
+            key_file_path = key_file.name
+        
+        oci_config = {
+            "user": config_json["user"],
+            "key_file": key_file_path,
+            "fingerprint": config_json["fingerprint"],
+            "tenancy": config_json["tenancy"],
+            "region": config_json["region"]
+        }
+        signer = oci.Signer.from_config(oci_config)
+    else:
+        startup_log.info("Using resource principal for authentication.")
+        signer = oci.auth.signers.get_resource_principals_signer()
+    # --- END TEMPORARY MODIFICATION ---
+    
+    
+    
+    
     
     startup_log.info("Attempting to initialize OCI signer using Resource Principals.")
     try:
@@ -133,11 +174,32 @@ def initialize_dependencies():
             "Verify VCN Service Gateway and IAM policies."
         ) from e
 
+    # Now use the determined signer and config for all clients
     object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
+        
+        
+            startup_log.info(f"Initializing dependencies (attempt {attempt + 1}/{max_retries}).")
+            
+            # --- DEBUG-ENHANCEMENT 2: Log before the network call to Secrets ---
+            startup_log.info("Attempting to fetch secret bundle from OCI Vault.")
+            secrets_client = oci.secrets.SecretsClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
+            secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
+            secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
+            db_config = DbSecret.model_validate(json.loads(secret_content))
+            
+            # --- DEBUG-ENHANCEMENT 3: Log connection details (password is auto-masked by Pydantic) ---
+            startup_log.info("Secret bundle fetched. Preparing database connection.", extra={
+                "db_host": db_config.host,
+                "db_port": db_config.port,
+                "db_user": db_config.username,
+                "db_name": db_config.dbname
+            })
+            
+        
             startup_log.info(f"Initializing database engine (attempt {attempt + 1}/{max_retries}).")
             secrets_client = oci.secrets.SecretsClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
             secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
@@ -147,6 +209,15 @@ def initialize_dependencies():
             engine = create_engine(db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800, connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"})
             with engine.connect() as connection:
                 db_version = connection.execute(text("SELECT version()")).scalar()
+
+
+            
+            # --- DEBUG ENHANCEMENT 4: Log before the network call to the Database ---
+            startup_log.info("Attempting to establish and validate database connection.")
+            with engine.connect() as connection:
+                db_version = connection.execute(text("SELECT version()")).scalar()
+            
+            
             startup_log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
             db_engine = engine
             return
