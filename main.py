@@ -193,7 +193,7 @@ def initialize_dependencies():
             
             startup_log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
             db_engine = engine
-            return # Success, exit the loop
+            return ## Success, exit the loop
         except Exception as e:
             startup_log.error(f"Failed to initialize database on attempt {attempt + 1}: {e}", exc_info=True)
             if attempt < max_retries - 1:
