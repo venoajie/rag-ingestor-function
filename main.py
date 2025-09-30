@@ -4,6 +4,8 @@
 import os         # <--- ADD THIS LINE
 import tempfile   # <--- ADD THIS LINE
 
+print("--- MAIN.PY VERSION CHECK: v2.2.1-debug ---")
+
 import base64
 import gzip
 import io
