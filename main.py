@@ -1,5 +1,9 @@
 
-# main.py - v2.2 (Hardened)
+# main.py - v2.2 
+
+import os         # <--- ADD THIS LINE
+import tempfile   # <--- ADD THIS LINE
+
 import base64
 import gzip
 import io
