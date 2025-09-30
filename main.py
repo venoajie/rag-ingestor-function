@@ -65,7 +65,7 @@ handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
 logger.propagate = False
 
-# --- 2. Context-Aware Logging (No changes) ---
+## --- 2. Context-Aware Logging (No changes) ---
 def get_logger(fn_invoke_id: Annotated[str | None, Header(alias="fn-invoke-id")] = None) -> logging.LoggerAdapter:
     invocation_id = fn_invoke_id or str(uuid.uuid4())
     return logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
