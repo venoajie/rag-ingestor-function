@@ -53,7 +53,9 @@ jobs:
       run: |
         echo "Building image with tag: ${{ env.FULL_IMAGE_NAME }}"
         # We must specify the platform to ensure an AMD64 build
-        docker build --platform linux/amd64 -t "${{ env.FULL_IMAGE_NAME }}" .
+        #docker build --platform linux/amd64 -t "${{ env.FULL_IMAGE_NAME }}" .
+        
+        docker build --platform linux/amd64 --no-cache -t "${{ env.FULL_IMAGE_NAME }}" .
         
         echo "Pushing image to OCIR..."
         # This command will fail loudly if there is any issue
