@@ -113,128 +113,95 @@ def get_settings() -> Settings:
 def initialize_dependencies():
     global db_engine, object_storage_client, app_settings
     startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
-    
+
     try:
         settings = Settings()
         app_settings = settings
-        
-        
-        # --- DEBUG-ENHANCEMENT 1: Log loaded settings for clarity ---
         startup_log.info("Application settings loaded.", extra={
             "DB_SECRET_OCID": settings.DB_SECRET_OCID,
             "OCI_NAMESPACE": settings.OCI_NAMESPACE
         })
-        
     except pydantic.ValidationError as e:
-        raise ConfigurationError(f"Invalid configuration during startup: {e}") from e  
-    
-    
-    # --- START TEMPORARY MODIFICATION ---
+        raise ConfigurationError(f"Invalid configuration during startup: {e}") from e
+
+    # --- CORRECT IMPLEMENTATION of the Temporary User Auth Test ---
     signer = None
     oci_config = {}
+    # We use the globally imported 'os' module here.
     oci_config_b64 = os.getenv("OCI_CONFIG_B64")
 
     if oci_config_b64:
         startup_log.warning("Using temporary user principal auth from OCI_CONFIG_B64.")
-        config_content = base64.b64decode(oci_config_b64).decode('utf-8')
-        config_json = json.loads(config_content)
-        
-        # The OCI SDK needs the key as a file, so we write it temporarily
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
-            key_file.write(config_json["key_content"])
-            key_file_path = key_file.name
-        
-        oci_config = {
-            "user": config_json["user"],
-            "key_file": key_file_path,
-            "fingerprint": config_json["fingerprint"],
-            "tenancy": config_json["tenancy"],
-            "region": config_json["region"]
-        }
-        signer = oci.Signer.from_config(oci_config)
+        try:
+            config_content = base64.b64decode(oci_config_b64).decode('utf-8')
+            config_json = json.loads(config_content)
+            
+            # The OCI SDK needs the key as a file, so we write it temporarily
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
+                key_file.write(config_json["key_content"])
+                key_file_path = key_file.name
+            
+            oci_config = {
+                "user": config_json["user"],
+                "key_file": key_file_path,
+                "fingerprint": config_json["fingerprint"],
+                "tenancy": config_json["tenancy"],
+                "region": config_json["region"]
+            }
+            signer = oci.Signer.from_config(oci_config)
+            startup_log.info("Successfully created signer from user principal config.")
+        except Exception as e:
+            startup_log.critical("Failed to create signer from OCI_CONFIG_B64. The variable may be malformed.", exc_info=True)
+            raise ConfigurationError("Could not initialize with OCI_CONFIG_B64.") from e
     else:
-        startup_log.info("Using resource principal for authentication.")
-        signer = oci.auth.signers.get_resource_principals_signer()
-    # --- END TEMPORARY MODIFICATION ---
-    
-    
-    
-    
-    
-    startup_log.info("Attempting to initialize OCI signer using Resource Principals.")
-    try:
-        signer = oci.auth.signers.get_resource_principals_signer()
-        startup_log.info("Successfully initialized Resource Principals signer.")
-    except Exception as e:
-        # This is the critical debugging step. We dump the environment.
-        import os
-        env_vars = {k: v for k, v in os.environ.items() if "OCI" in k or "FN" in k}
-        startup_log.critical(
-            "FATAL: Failed to get Resource Principals signer. "
-            "This almost always means a networking (Service Gateway) or IAM (Dynamic Group/Policy) issue. "
-            f"Underlying error: {e}",
-            extra={"relevant_environment_variables": env_vars}
-        )
-        raise ConfigurationError(
-            "Could not authenticate with OCI Resource Principals. "
-            "Verify VCN Service Gateway and IAM policies."
-        ) from e
+        startup_log.info("OCI_CONFIG_B64 not found. Using resource principal for authentication.")
+        try:
+            signer = oci.auth.signers.get_resource_principals_signer()
+            startup_log.info("Successfully initialized Resource Principals signer.")
+        except Exception as e:
+            # This is where we can dump environment variables if RP fails
+            env_vars = {k: v for k, v in os.environ.items() if "OCI" in k or "FN" in k}
+            startup_log.critical(
+                "Failed to get Resource Principals signer. This indicates a potential IAM or VCN networking issue.",
+                extra={"underlying_error": str(e), "relevant_env_vars": env_vars}
+            )
+            raise ConfigurationError("Could not authenticate with OCI Resource Principals.") from e
 
     # Now use the determined signer and config for all clients
-    object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
+    object_storage_client = oci.object_storage.ObjectStorageClient(config=oci_config, signer=signer, retry_strategy=standard_retry_strategy)
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
-        
-        
-            startup_log.info(f"Initializing dependencies (attempt {attempt + 1}/{max_retries}).")
+            startup_log.info(f"Initializing database connection (attempt {attempt + 1}/{max_retries}).")
+            secrets_client = oci.secrets.SecretsClient(config=oci_config, signer=signer, retry_strategy=standard_retry_strategy)
             
-            # --- DEBUG-ENHANCEMENT 2: Log before the network call to Secrets ---
             startup_log.info("Attempting to fetch secret bundle from OCI Vault.")
-            secrets_client = oci.secrets.SecretsClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
             secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
             secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
             db_config = DbSecret.model_validate(json.loads(secret_content))
             
-            # --- DEBUG-ENHANCEMENT 3: Log connection details (password is auto-masked by Pydantic) ---
-            startup_log.info("Secret bundle fetched. Preparing database connection.", extra={
-                "db_host": db_config.host,
-                "db_port": db_config.port,
-                "db_user": db_config.username,
-                "db_name": db_config.dbname
+            startup_log.info("Secret bundle fetched. Preparing database connection string.", extra={
+                "db_host": db_config.host, "db_port": db_config.port, "db_user": db_config.username
             })
-            
-        
-            startup_log.info(f"Initializing database engine (attempt {attempt + 1}/{max_retries}).")
-            secrets_client = oci.secrets.SecretsClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
-            secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
-            secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
-            db_config = DbSecret.model_validate(json.loads(secret_content))
             db_connection_string = f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}@{db_config.host}:{db_config.port}/{db_config.dbname}"
-            engine = create_engine(db_connection_string, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=1800, connect_args={"connect_timeout": 10, "application_name": "rag-ingestion-fn"})
-            with engine.connect() as connection:
-                db_version = connection.execute(text("SELECT version()")).scalar()
-
-
+            engine = create_engine(db_connection_string, pool_pre_ping=True, connect_args={"connect_timeout": 10})
             
-            # --- DEBUG ENHANCEMENT 4##: Log before the network call to the Database ---
             startup_log.info("Attempting to establish and validate database connection.")
             with engine.connect() as connection:
                 db_version = connection.execute(text("SELECT version()")).scalar()
             
-            
             startup_log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
             db_engine = engine
-            return
+            return # Success, exit the loop
         except Exception as e:
-            startup_log.error(f"Failed to initialize database engine on attempt {attempt + 1}: {e}", exc_info=True)
+            startup_log.error(f"Failed to initialize database on attempt {attempt + 1}: {e}", exc_info=True)
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                startup_log.critical("All attempts to initialize database engine failed during startup.")
+                startup_log.critical("All attempts to initialize database failed during startup.")
                 raise
-
+                
 def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClient, settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
