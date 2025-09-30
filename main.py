@@ -212,7 +212,7 @@ def initialize_dependencies():
 
 
             
-            # --- DEBUG ENHANCEMENT 4: Log before the network call to the Database ---
+            # --- DEBUG ENHANCEMENT 4##: Log before the network call to the Database ---
             startup_log.info("Attempting to establish and validate database connection.")
             with engine.connect() as connection:
                 db_version = connection.execute(text("SELECT version()")).scalar()
