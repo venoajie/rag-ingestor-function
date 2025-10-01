@@ -1,4 +1,4 @@
-# OCI Serverless Function: RAG Ingestor - v5.0 
+# OCI Serverless Function: RAG Ingestor - v5.0 (Hardened)
 
 This repository contains the source code and the definitive, battle-tested deployment guide for the `rag-ingestor` OCI Function. This document has been hardened with lessons learned from a series of production-blocking incidents to ensure a robust, repeatable, and understandable deployment process.
 
@@ -15,9 +15,6 @@ This function is a critical component of the RAG ecosystem. It is a serverless, 
 ```
 
 **Core Technology:** This function is implemented as a self-contained **FastAPI application** running in a custom Docker container.
-
-**Architectural Decision (PB-20250924-01): The "FDK-less" Architecture**
-The decision to bypass the official Oracle Python FDK (`fdk`) was made after a critical, unfixable build deadlock was discovered. The `fdk`'s dependency on `httptools==0.4.0` is fundamentally incompatible with the C-API of Python 3.11+. This "FDK-less" approach resolves the build deadlock, unlocks the use of modern Python versions, and improves local testability.
 
 ## 2. Prerequisites
 
@@ -40,25 +37,32 @@ Ensure you have the following configured in your GitHub repository's **Settings 
 
 Before the first deployment, the following OCI resources and policies **MUST** be correctly configured. Failure to do so will result in the cryptic and misleading errors detailed in the troubleshooting section.
 
-### 3.1. VCN Networking
+### 3.1. VCN Networking: Hub & Spoke with DRG
 
-The function runs in a private subnet. This subnet's configuration is critical for allowing it to be invoked and to call other OCI services.
-*   **Route Table:** The subnet's Route Table **MUST** have a rule directing traffic for `All <region> Services in Oracle Services Network` to a **Service Gateway**.
-*   **Security List:** The subnet's Security List **MUST** have a **Stateful Ingress** rule allowing traffic from `Source Service: All <region> Services in Oracle Services Network` on at least **TCP port 443**.
+The function runs in a private subnet within a "Spoke" VCN (`rag-project-vcn`), connecting to a database in a central "Hub" VCN (`shared-infrastructure-vcn`). This connection is managed by a **Dynamic Routing Gateway (DRG)**.
+
+*   **DRG Route Table:** The DRG's internal route table **MUST** have static routes that explicitly teach it how to route traffic between the Hub and Spoke VCNs. Without these rules, the DRG acts as a "silent black hole," dropping all cross-VCN traffic.
+    *   **Example Rule 1:** `Destination: 10.0.0.0/16` -> `Next Hop: hub-vcn-attachment`
+    *   **Example Rule 2:** `Destination: 10.1.0.0/16` -> `Next Hop: RAG-VCN-attachment`
+
+*   **Function Subnet Route Table:**
+    *   **LESSON LEARNED:** The **Service Gateway** proved to be an unreliable "silent black hole" for egress traffic from the function to OCI services (like IAM).
+    *   **REQUIRED CONFIGURATION:** The subnet's Route Table **MUST** have a rule directing all outbound traffic (`0.0.0.0/0`) to a **NAT Gateway**. This provides a reliable path for the function to authenticate itself and for any other outbound needs.
+
+*   **Function Subnet Security List:**
+    *   The subnet's Security List **MUST** have a **Stateful Ingress** rule allowing traffic from `Source Service: All <region> Services in Oracle Services Network` on **All Protocols**. This is required for the OCI platform to manage the function (e.g., invocation, health checks) and for services like Bastion to work.
 
 ### 3.2. IAM Policies
 
-Two sets of permissions are required: one for the CI/CD pipeline to deploy resources, and one for the function to run.
+These policies **must be created in the Root Compartment (Tenancy)** to correctly grant permissions across compartments.
 
-**A. For the CI/CD User (the user associated with `OCI_USER_OCID`):**
-This user's group needs permission to push container images. This policy should be in the **root compartment**.
+**A. For the CI/CD User:**
 ```
 # Allows the CI/CD user to create repositories and push images into the project compartment.
 Allow group <Your-CI-CD-User-Group> to manage repos in compartment RAG-Project
 ```
 
 **B. For the Function's Runtime (Resource Principals):**
-This policy allows the running function to authenticate and access other services. This policy should be in the **root compartment**.
 ```
 # Allows the function to identify itself and its group membership.
 Allow dynamic-group RAGIngestorFunctionDynamicGroup to inspect dynamic-groups in tenancy
@@ -75,69 +79,120 @@ Allow dynamic-group RAGIngestorFunctionDynamicGroup to read objects in compartme
 
 ### 3.3. The Dynamic Group
 
-The Dynamic Group is the link between your function resource and its IAM permissions.
-*   **CRITICAL LESSON:** Identifying the function by its OCID (`resource.id = 'ocid...'`) is **brittle**. The OCID changes every time the function is recreated, requiring a manual update to this rule.
-*   **ROBUST SOLUTION:** Identify the function by a tag that is applied automatically by the CI/CD pipeline. This makes the infrastructure resilient to recreation.
+*   **CRITICAL LESSON:** Identifying the function by its OCID (`resource.id = 'ocid...'`) is **brittle**. The OCID changes every time the function is recreated.
+*   **ROBUST SOLUTION:** Identify all functions within the target compartment. This is secure as long as the compartment is dedicated to this application.
 
 **Recommended Dynamic Group Rule:**
 ```
-# Match any function that has been tagged by our CI/CD pipeline.
-ALL {resource.type = 'fnfunc', resource.defined_tags.MyTags.name = 'rag-ingestor-fn'}
+# Match any function within the RAG-Project compartment.
+ALL {resource.type = 'fnfunc', resource.compartment.id = 'ocid1.compartment.oc1..aaaa...'}
 ```
-*(Note: This requires a one-time setup of the `MyTags` Tag Namespace in OCI.)*
 
-## 4. Canonical Deployment Method: Manual Creation, Automated Updates
+## 4. Deployment & Troubleshooting
 
-**CRITICAL LESSON LEARNED:** The automated tools (`fn` CLI, `oci` CLI) have proven unreliable for **creating** a new function with its identity correctly provisioned. The only foolproof method is to create the function manually via the OCI Console UI the first time. All subsequent deployments can then be automated.
+This section combines the deployment process with the specific errors encountered and their definitive solutions.
 
-### 4.1. The One-Time Manual Setup
+### 4.1. Deployment: Manual Creation, Automated Updates
 
-1.  **Run the CI/CD Pipeline Once:** Push a commit to `main`. The pipeline will fail at the final "Create or Update" step because the function doesn't exist yet, but the most important step—**building and pushing the image to OCIR**—will succeed.
-2.  **Verify the Image:** Go to the OCI Console -> **Container Registry**. Select the `RAG-Project` compartment. You will now see the `rag-project/rag-app/rag-ingestor` repository. This confirms the image exists.
-3.  **Create the Function Manually:**
-    *   Navigate to your `rag-app` Function Application.
-    *   Click **"Create function"** and select **"Create from existing image"**.
-    *   **Name:** `rag-ingestor`
-    *   **Image Repository:** Select `rag-project/rag-app/rag-ingestor` from the (now populated) dropdown.
-    *   **Image Tag:** Select the latest commit SHA from the dropdown.
-    *   Set Memory to `1024` and Timeout to `120`.
-    *   Click **"Create"**.
-4.  **Update the Dynamic Group:** Copy the OCID of the function you just created and update your Dynamic Group rule to match it. This is the final manual wiring step.
+The only foolproof method is to create the function manually the first time.
 
-### 4.2. Ongoing Automated Updates
+1.  **Run the CI/CD Pipeline Once:** Push a commit. It will fail, but it will successfully push the Docker image to OCIR.
+2.  **Create the Function Manually:** In the OCI Console, create the function from the "existing image" you just pushed.
+3.  All subsequent pushes will be handled automatically by the `deploy.yml` workflow, which updates the function with the new image.
 
-After the one-time manual setup, all subsequent pushes to `main` will be handled by the CI/CD pipeline defined in `.github/workflows/deploy.yml`. The pipeline will build and push a new image, then use the `oci fn function update` command to point the existing, healthy function to the new image version.
+### 4.2. Troubleshooting Flow
 
-## 5. Operations and Troubleshooting: The Battle-Tested Diagnostic Flow
+**Symptom: `FATAL: ... private.pem` Error on Startup**
+*   **Diagnosis:** This is the most critical and misleading error. It means the function is running but **cannot talk to the OCI authentication service** to get its identity.
+*   **Root Cause:** The egress network path is blocked.
+*   **Action:** Verify the **Function Subnet Route Table** has a rule sending all traffic (`0.0.0.0/0`) to a **NAT Gateway**. The Service Gateway is not a reliable alternative.
 
-This flow is the result of our debugging journey and addresses the specific, misleading errors encountered.
+**Symptom: `504 Timeout` on Startup**
+*   **Diagnosis:** The function is timing out while trying to connect to an external resource, most likely the database.
+*   **Root Cause:** The network path between the function's VCN and the database's VCN is blocked.
+*   **Action:** Verify the **DRG Route Table** has the correct static routes to connect the two VCNs, as described in **Section 3.1**.
 
-### Symptom: No Logs at All After Triggering
+**Symptom: CI/CD Fails with `repository name must be lowercase`**
+*   **Diagnosis:** The Docker client requires lowercase image repository paths.
+*   **Action:** Ensure the image tag in `deploy.yml` uses a lowercase version of your compartment name (e.g., `.../rag-project/...`).
 
-*   **Diagnosis:** The invocation event is not reaching the function.
-*   **Action Checklist:**
-    1.  **Event Rule Wiring:** Go to **Events Service -> Rules**. Edit your rule. Is the **Action** correctly pointing to the current, existing `rag-ingestor` function? This link breaks every time the function is recreated and must be manually re-wired.
-    2.  **VCN Networking:** Review the checklist in **Section 3.1**. A missing Route Table rule or Security List rule is the most common cause.
+---
 
-### Symptom: `502` Crash on Startup with `FATAL: ... private.pem` Error
 
-*   **Diagnosis:** This is the most critical and misleading error. It means the function is running but **lacks a Resource Principal identity**. The platform has not injected the necessary credentials.
-*   **Action Checklist:**
-    1.  **The Primary Cause:** Was the function created by an automated script (`fn deploy` or `oci fn function create`)? These tools have proven unreliable. **The Fix:** Delete the function and follow the **manual creation process** in **Section 4.1**.
-    2.  **The Secondary Cause:** Is the **Dynamic Group** rule correct? It **MUST** match the OCID of the currently deployed function. If you have recreated the function, you **MUST** update this rule manually.
+### 1. Updated Documentation: `Appendix A`
 
-### Symptom: `502` Crash on Startup with `NoSuchModuleError: ... psycopg`
+I will now update the "On-going Debugging" section of your `README.md`. This will be the definitive starting point for your next session.
 
-*   **Diagnosis:** The application code is trying to load a binary package that was compiled for the wrong CPU architecture.
-*   **Cause:** The Docker image was built without specifying the target platform.
-*   **The Fix:** Ensure the `docker/build-push-action` step in your `deploy.yml` contains the line: `platforms: linux/amd64`.
+---
+## Appendix A: Current Debugging State (As of 2025-09-30 - End of Session)
 
-### Symptom: `504`
+This section serves as a snapshot of the last debugging session to ensure continuity.
 
-The `504` error is a generic, misleading symptom. It rarely means a true timeout. It almost always means the **container crashed instantly**, and the platform timed out while waiting for a response that would never come.
+### 1. Current Status & Final Failure Point
 
-### Symptom: CI/CD Fails with `repository name must be lowercase`
+*   The function has been reverted to its clean, production-intent state, using **Resource Principals** for authentication.
+*   The original `FATAL: ... private.pem` error is **RESOLVED**.
+*   The function now successfully initializes, authenticates to OCI via the **NAT Gateway**, and fetches the database secret from the Vault.
+*   The **final point of failure** is a `504 Timeout` that occurs when the function attempts to establish a TCP connection to the PostgreSQL database at `10.0.0.146:6432`.
 
-*   **Diagnosis:** The Docker client has a strict rule that image repository paths must be lowercase.
-*   **The Fix:** Ensure the image tag constructed in your `deploy.yml` uses a lowercase version of your compartment name (e.g., `.../rag-project/...`). The OCI backend is smart enough to map this to your mixed-case `RAG-Project` compartment.
+### 2. Hypotheses Status
 
+*   **[RESOLVED]** The function's egress path to OCI services was blocked. **Fix:** Replaced the faulty Service Gateway route with a `0.0.0.0/0` route to a **NAT Gateway**.
+*   **[RESOLVED]** The network path between the Hub and Spoke VCNs was blocked. **Fix:** Added the correct static routes to the **DRG Route Table**.
+*   **[ACTIVE & PRIMARY]** A firewall is blocking the connection from the function's subnet (`10.1.1.0/24`) to the database VM (`10.0.0.146`) on port `6432`. This could be the VCN Security List or the host's internal firewall (`firewalld`).
+
+### 3. Key Lessons Learned
+
+*   The `private.pem` error is a symptom of a failed network call to the OCI authentication service, not a missing file.
+*   In a Hub-and-Spoke topology, the DRG's internal route table is a critical, non-obvious point of failure.
+*   A NAT Gateway is a more reliable egress path for private subnets than a Service Gateway.
+*   Debugging private network resources is complex and requires tools like Bastion or Run Command, which have their own deep prerequisites (correct OS, healthy agent, IAM policies, FIPS-compliant keys).
+
+### 4. Temporary Resources & Cleanup Checklist
+
+*   **[ACTIVE - NEEDS CLEANUP]** Compute Instance: `rag-function-debug-client-ol`
+*   **[ACTIVE - NEEDS CLEANUP]** Bastion Service: `BastionRagDebug` and all its sessions.
+*   **[ACTIVE - NEEDS CLEANUP]** Dynamic Group: `Temp-Debug-Instance-DG`
+*   **[ACTIVE - NEEDS CLEANUP]** IAM Policy: `Temp-Debug-Instance-RunCommand-Policy`
+*   **[KEPT BY DESIGN]** NAT Gateway: `rag-project-nat-gw`. This is now a required part of the architecture.
+
+### 5. Next Diagnostic Step for Next Session
+
+The very first action for the next session should be to re-verify the end-to-end network path using the debug tools, now that we know all their prerequisites.
+
+1.  **Goal:** Get a successful `nc -z -v 10.0.0.146 6432` command to run from a resource inside the `10.1.1.0/24` subnet.
+2.  **Primary Tool:** Use the **Run Command** feature on the `rag-function-debug-client-ol` instance, as it has the fewest dependencies.
+3.  **If Run Command still fails:** The issue is likely the IAM policy for the debug instance.
+4.  **If Run Command succeeds:** The network path is open, and the function's timeout is due to a more subtle platform issue.
+5.  **If Run Command fails with a timeout:** The block is the **database VCN's Security List** or the **database host's `firewalld`**. Re-run the checks from the `DATABASE_OPERATIONS_MANUAL.md` on the database host.
+
+---
+
+### 2. Modifications to Files for the Next Debugger
+
+You asked what the next debugger needs to pay attention to. This is a critical handoff.
+
+*   **`main.py`:**
+    *   **Status:** It currently contains temporary logic for user-based authentication (`OCI_CONFIG_B64`).
+    *   **Action Required:** This logic **must be removed**. The `initialize_dependencies` function should be reverted to its clean, production state that only uses `signer = oci.auth.signers.get_resource_principals_signer()`. The temporary `OCI_CONFIG_B64` variable should be deleted from the Application's configuration.
+
+*   **`func.yaml`:**
+    *   **Status:** This file is correct and production-ready. The annotation `oracle.com/oci/auth/principal: "dynamic_group"` is present and correct.
+    *   **Action Required:** No changes needed.
+
+*   **`Dockerfile`:**
+    *   **Status:** This file is well-structured, uses multi-stage builds, and is production-ready.
+    *   **Action Required:** No changes needed.
+
+*   **`.github/workflows/deploy.yml`:**
+    *   **Status:** This file is mostly correct but needs a critical hardening step we identified.
+    *   **Action Required:** The `oci fn function update` command **must be modified** to include the `--force` and `--annotation` flags to ensure the function's identity is correctly applied on every deployment.
+        ```yaml
+        # In the 'Create or Update OCI Function' step
+        oci fn function update \
+          --function-id "$FUNCTION_OCID" \
+          --image "${{ env.FULL_IMAGE_NAME }}" \
+          --force \
+          --annotation oracle.com/oci/auth/principal="dynamic_group"
+        ```
+    *   The `--no-cache` flag in the `docker build` step was for debugging and can be removed to speed up future builds.
