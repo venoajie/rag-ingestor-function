@@ -81,4 +81,6 @@ jobs:
           oci fn function update \
             --function-id "$FUNCTION_OCID" \
             --image "${{ env.FULL_IMAGE_NAME }}"
+            --force \
+            --annotation oracle.com/oci/auth/principal="dynamic_group"          
         fi
