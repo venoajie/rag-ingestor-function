@@ -1,6 +1,11 @@
-# main.py - v2.3
 
-import os
+# main.py - v2.2 
+
+import os         # <--- ADD THIS LINE
+import tempfile   # <--- ADD THIS LINE
+
+print("--- MAIN.PY VERSION CHECK: v2.2.1-debug ---")
+
 import base64
 import gzip
 import io
@@ -84,6 +89,7 @@ db_engine: Engine | None = None
 object_storage_client: oci.object_storage.ObjectStorageClient | None = None
 app_settings: Settings | None = None
 
+# REFINEMENT: Define a standard, reusable retry strategy for all OCI clients.
 standard_retry_strategy = RetryStrategyBuilder().add_max_attempts(4).get_retry_strategy()
 
 def get_db_engine() -> Engine:
@@ -118,22 +124,48 @@ def initialize_dependencies():
     except pydantic.ValidationError as e:
         raise ConfigurationError(f"Invalid configuration during startup: {e}") from e
 
-    # --- REFACTORED: Initialize OCI clients using production-standard Resource Principals ---
+    # --- CORRECT IMPLEMENTATION of the Temporary User Auth Test ---
     signer = None
-    oci_config = {}  # OCI SDK clients require a config dict, even if empty for RP.
+    oci_config = {}
+    # We use the globally imported 'os' module here.
+    oci_config_b64 = os.getenv("OCI_CONFIG_B64")
 
-    startup_log.info("Initializing OCI clients using Resource Principal for authentication.")
-    try:
-        signer = oci.auth.signers.get_resource_principals_signer()
-        startup_log.info("Successfully initialized Resource Principals signer.")
-    except Exception as e:
-        # Dump relevant environment variables if RP fails for easier debugging.
-        env_vars = {k: v for k, v in os.environ.items() if "OCI" in k or "FN" in k}
-        startup_log.critical(
-            "Failed to get Resource Principals signer. This indicates a potential IAM or VCN networking issue.",
-            extra={"underlying_error": str(e), "relevant_env_vars": env_vars}
-        )
-        raise ConfigurationError("Could not authenticate with OCI Resource Principals.") from e
+    if oci_config_b64:
+        startup_log.warning("Using temporary user principal auth from OCI_CONFIG_B64.")
+        try:
+            config_content = base64.b64decode(oci_config_b64).decode('utf-8')
+            config_json = json.loads(config_content)
+            
+            # The OCI SDK needs the key as a file, so we write it temporarily
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
+                key_file.write(config_json["key_content"])
+                key_file_path = key_file.name
+            
+            oci_config = {
+                "user": config_json["user"],
+                "key_file": key_file_path,
+                "fingerprint": config_json["fingerprint"],
+                "tenancy": config_json["tenancy"],
+                "region": config_json["region"]
+            }
+            signer = oci.Signer.from_config(oci_config)
+            startup_log.info("Successfully created signer from user principal config.")
+        except Exception as e:
+            startup_log.critical("Failed to create signer from OCI_CONFIG_B64. The variable may be malformed.", exc_info=True)
+            raise ConfigurationError("Could not initialize with OCI_CONFIG_B64.") from e
+    else:
+        startup_log.info("OCI_CONFIG_B64 not found. Using resource principal for authentication.")
+        try:
+            signer = oci.auth.signers.get_resource_principals_signer()
+            startup_log.info("Successfully initialized Resource Principals signer.")
+        except Exception as e:
+            # This is where we can dump environment variables if RP fails
+            env_vars = {k: v for k, v in os.environ.items() if "OCI" in k or "FN" in k}
+            startup_log.critical(
+                "Failed to get Resource Principals signer. This indicates a potential IAM or VCN networking issue.",
+                extra={"underlying_error": str(e), "relevant_env_vars": env_vars}
+            )
+            raise ConfigurationError("Could not authenticate with OCI Resource Principals.") from e
 
     # Now use the determined signer and config for all clients
     object_storage_client = oci.object_storage.ObjectStorageClient(config=oci_config, signer=signer, retry_strategy=standard_retry_strategy)
@@ -187,6 +219,8 @@ def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClien
     except json.JSONDecodeError as e:
         log.error(f"Failed to parse JSON from object '{object_name}'. The file may be corrupted.", exc_info=True)
         raise ValueError(f"Invalid JSON in source object: {object_name}") from e
+
+# _validate_table_exists and _process_database_transaction remain unchanged
 
 def _validate_table_exists(connection: 'Connection', table_name: str, log: logging.LoggerAdapter):
     if not re.match(r'^codebase_collection_[a-zA-Z0-9_]+$', table_name):
@@ -244,7 +278,7 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
-    startup_log.info("--- RAG INGESTOR v2.3 (Hardened) LIFESPAN START ---")
+    startup_log.info("--- RAG INGESTOR v2.2 (Hardened) LIFESPAN START ---")
     try:
         initialize_dependencies()
         startup_log.info("--- ALL DEPENDENCIES INITIALIZED SUCCESSFULLY ---")
@@ -256,8 +290,9 @@ async def lifespan(app: FastAPI):
         db_engine.dispose()
         startup_log.info("--- DATABASE CONNECTION POOL CLOSED ---")
 
-app = FastAPI(title="RAG Ingestor", version="2.3.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="RAG Ingestor", version="2.2.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 
+# Exception handlers remain unchanged
 @app.exception_handler(ConfigurationError)
 async def configuration_exception_handler(request: Request, exc: ConfigurationError):
     logger.critical(f"Configuration Error: {exc}", extra={'invocation_id': 'config_error'})

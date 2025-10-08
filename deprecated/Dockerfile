@@ -6,9 +6,13 @@ FROM python:3.12.3-slim-bookworm AS builder
 # Set an environment variable for the venv path.
 ENV VENV_PATH=/opt/venv
 
-# Install uv using pip into the global site-packages.
+# --- THE UV UPGRADE (Corrected Method) ---
+# Install uv using pip into the global site-packages. This is the most
+# reliable method inside a Docker build.
 RUN pip install --no-cache-dir uv
+# Verify the installation. 'uv' will now be on the default PATH.
 RUN uv --version
+# --- END UV UPGRADE ---
 
 # Create the virtual environment.
 RUN python3 -m venv $VENV_PATH
@@ -17,13 +21,13 @@ RUN python3 -m venv $VENV_PATH
 ENV PATH="$VENV_PATH/bin:$PATH"
 
 # Copy only requirements to leverage layer caching.
-COPY requirements.txt .
+COPY requirements.lock.txt .
 
-# Install dependencies into the venv using uv.
-# NOTE: The original file used requirements.lock.txt. The provided requirements.txt is used here.
-RUN uv pip install --no-cache -r requirements.txt
+# Install dependencies into the venv using the much faster 'uv'.
+RUN uv pip install --no-cache -r requirements.lock.txt
 
 # --- Stage 2: Runtime ---
+# This stage remains unchanged.
 FROM python:3.12.3-slim-bookworm
 
 ENV VENV_PATH=/opt/venv
@@ -41,9 +45,10 @@ USER appuser
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# The OCI Functions platform does not use the EXPOSE instruction. It has been removed.
-# The HEALTHCHECK is also removed as it targets a TCP port which is no longer exposed.
+EXPOSE 8080
 
-# CORRECTED CMD: This command launches uvicorn to listen on the Unix Domain Socket
-# provided by the OCI Functions platform, which is the standard for OCI.
-CMD ["uvicorn", "main:app", "--uds", "/tmp/iofs/lsnr.sock", "--loop", "uvloop", "--workers", "1"]
+# Add a healthcheck to ensure the FastAPI server is running
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop", "--workers", "1"]

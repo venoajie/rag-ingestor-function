@@ -1,0 +1,25 @@
+
+# .dockerignore
+
+# Ignore the deployment script itself. Changes to this file should
+# NOT trigger a Docker rebuild. This is the key to fixing the caching issue.
+deploy.sh
+
+# Ignore Git repository files
+.git
+.gitignore
+
+# Ignore Python cache and artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore local development environments
+.venv/
+venv/
+env/
+
+# Ignore local configuration and editor files
+.vscode/
+*.env
