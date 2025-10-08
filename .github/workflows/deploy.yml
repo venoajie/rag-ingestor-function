@@ -21,8 +21,8 @@ jobs:
       run: |
         pip install oci-cli
         mkdir -p ~/.oci
-        # This simple echo now works because the secret value in GitHub is correct.
-        echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+        # [FIX] Use printf for a more robust way to write the multi-line key and ensure a final newline.
+        printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
 
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
