@@ -1,4 +1,3 @@
-# func.yaml
 
 schema_version: 20180708
 name: rag-ingestor
@@ -8,10 +7,3 @@ memory: 1024
 timeout: 120
 config:
   DB_SECRET_OCID: "ocid1.vaultsecret.oc1.eu-frankfurt-1.amaaaaaaaenu5lyas5scqzuhlws7pzsg6jxsmcbybu2uecizvqs5p2ghbuda"
-  subnets:
-- ocid1.subnet.oc1.eu-frankfurt-1.aaaaaaaasgonusyk6n3ypteetzt7ucbk25l2ncpmn447grxobwm2q2uwfx7q
-annotations:
-  fn.oci.oracle.com/fn/invokeEndpoint: "/"
-  oracle.com/oci/auth/principal: "dynamic_group"
-  
-  
