@@ -1,5 +1,4 @@
-# This workflow automatically deploys code changes on every push to the main branch.
-# It only updates the function's Docker image, ensuring infrastructure is not changed.
+
 name: 'Deploy Application Code'
 
 on:
@@ -22,9 +21,8 @@ jobs:
       run: |
         pip install oci-cli
         mkdir -p ~/.oci
-        # [FIX] Write key and explicitly append a newline to satisfy OCI CLI requirements
+        # This simple echo now works because the secret value in GitHub is correct.
         echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
-        echo "" >> ~/.oci/oci_api_key.pem
 
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
@@ -33,21 +31,17 @@ jobs:
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
         
-        # Set restrictive permissions on the key and config
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
 
     - name: 3. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
-        # [FIX] Now correctly uses secrets.OCI_REGION_KEY
         registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
-        # [FIX] Corrected to OCIR_USERNAME based on your finding
         username: ${{ secrets.OCIR_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
     - name: 4. Set Image Tag Environment Variable
       run: |
-        # Note: OCI requires the repository part of the image name to be lowercase.
         REPO_NAME=$(echo "${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}" | tr '[:upper:]' '[:lower:]')
         IMAGE_TAG="${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${REPO_NAME}:${{ github.sha }}"
         echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
@@ -76,7 +70,6 @@ jobs:
         fi
 
         echo "Updating function $FUNCTION_OCID with new image..."
-        # This surgical command ONLY updates the image, leaving infrastructure untouched.
         oci fn function update \
           --function-id "$FUNCTION_OCID" \
           --image "${{ env.FULL_IMAGE_NAME }}"
