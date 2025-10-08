@@ -1,4 +1,3 @@
-
 # This workflow automatically deploys code changes on every push to the main branch.
 # It only updates the function's Docker image, ensuring infrastructure is not changed.
 name: 'Deploy Application Code'
@@ -23,19 +22,26 @@ jobs:
       run: |
         pip install oci-cli
         mkdir -p ~/.oci
+        # [FIX] Write key and explicitly append a newline to satisfy OCI CLI requirements
         echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+        echo "" >> ~/.oci/oci_api_key.pem
+
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
         echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+        
+        # Set restrictive permissions on the key and config
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
 
     - name: 3. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
+        # [FIX] Now correctly uses secrets.OCI_REGION_KEY
         registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
+        # [FIX] Corrected to OCIR_USERNAME based on your finding
         username: ${{ secrets.OCIR_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
@@ -55,14 +61,16 @@ jobs:
       run: |
         echo "Looking up Application OCID for '${{ env.APP_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
-        if [ -z "$APP_OCID" ]; then
+        
+        if [ -z "$APP_OCID" ] || [ "$APP_OCID" == "None" ]; then
           echo "FATAL: Application '${{ env.APP_NAME }}' not found. Run the 'Provision Function' workflow manually first."
           exit 1
         fi
 
         echo "Looking for existing function '${{ env.FUNCTION_NAME }}'..."
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
-        if [ -z "$FUNCTION_OCID" ]; then
+        
+        if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "None" ]; then
           echo "FATAL: Function '${{ env.FUNCTION_NAME }}' not found. Run the 'Provision Function' workflow manually first."
           exit 1
         fi
