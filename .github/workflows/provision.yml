@@ -35,7 +35,7 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
-        username: ${{ secrets.OCI_USERNAME }}
+        username: ${{ secrets.OCIR_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
     - name: 4. Set Image Tag Environment Variable
