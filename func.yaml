@@ -6,4 +6,5 @@ runtime: docker
 memory: 1024
 timeout: 120
 config:
-  DB_SECRET_OCID: "ocid1.vaultsecret.oc1.eu-frankfurt-1.amaaaaaaaenu5lyas5scqzuhlws7pzsg6jxsmcbybu2uecizvqs5p2ghbuda"
+  DB_SECRET_OCID: "ocid1.vaultsecret.oc1.eu-frankfurt-1.amaaaaaaaenu5lyak3zatzikgrvsfmqaap4l7l2khrifejmxrzzdet2yhnfa"
+  
