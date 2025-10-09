@@ -25,7 +25,6 @@ jobs:
 
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
-        # [FIX] Corrected typo from 'giconfig' to 'config'
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
         echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
