@@ -1,8 +1,5 @@
 # main.py - v2.3
 
-print("--- CAPTURE THIS TEST LOG ---") # ADD THIS LINE
-log.info("Function invocation started.")
-
 import os
 import base64
 import gzip
@@ -283,7 +280,10 @@ async def handle_invocation(
     engine: Engine = Depends(get_db_engine),
     os_client: oci.object_storage.ObjectStorageClient = Depends(get_os_client)
 ):
+
+    print("--- CAPTURE THIS TEST LOG ---") # ADD THIS LINE
     log.info("Function invocation started.")
+        
     try:
         body_bytes = await request.body()
         if not body_bytes:
