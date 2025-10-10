@@ -280,6 +280,7 @@ async def handle_invocation(
     engine: Engine = Depends(get_db_engine),
     os_client: oci.object_storage.ObjectStorageClient = Depends(get_os_client)
 ):
+    raise ValueError("--- THIS IS A FORCED CRASH TEST ---") # ADD THIS LINE
 
     print("--- CAPTURE THIS TEST LOG ---") # ADD THIS LINE
     log.info("Function invocation started.")
