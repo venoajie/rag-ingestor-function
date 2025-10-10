@@ -1,5 +1,8 @@
 # main.py - v2.3
 
+print("--- CAPTURE THIS TEST LOG ---") # ADD THIS LINE
+log.info("Function invocation started.")
+
 import os
 import base64
 import gzip
