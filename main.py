@@ -37,7 +37,7 @@ REQUIRED_AUTH_VARS = [
 PEM_HEADER = "-----BEGIN RSA PRIVATE KEY-----"
 PEM_FOOTER = "-----END RSA PRIVATE KEY-----"
 
-# --- 1. Advanced Structured Logging (No changes) ---
+# --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
     def format(self, record):
         log_record = {
@@ -67,12 +67,12 @@ handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
 logger.propagate = False
 
-## --- 2. Context-Aware Logging (No changes) ---
+## --- 2. Context-Aware Logging ---
 def get_logger(fn_invoke_id: Annotated[str | None, Header(alias="fn-invoke-id")] = None) -> logging.LoggerAdapter:
     invocation_id = fn_invoke_id or str(uuid.uuid4())
     return logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
 
-# --- 3. Strict Configuration (No changes) ---
+# --- 3. Strict Configuration ---
 class ConfigurationError(Exception): pass
 class DbSecret(pydantic.BaseModel):
     username: str
@@ -117,19 +117,22 @@ def initialize_dependencies():
     key_file_path = None
 
     try:
-        settings = Settings()
-        app_settings = settings
-        startup_log.info("Application settings loaded.", extra={
-            "DB_SECRET_OCID": settings.DB_SECRET_OCID,
-            "OCI_NAMESPACE": settings.OCI_NAMESPACE
-        })
+        # --- REVERTED: Use regex-based environment variable workaround ---
+        env_string = repr(os.environ)
+        def _get_config_from_env_str(key: str, env_str: str) -> str | None:
+            match = re.search(f"'{re.escape(key)}': '([^']*)'", env_str)
+            return match.group(1) if match else None
 
-        # --- REFACTORED: Initialize OCI clients using API Key Authentication ---
-        startup_log.info("Initializing OCI clients using API Key for authentication.")
-        config_values = {key: os.environ.get(key) for key in REQUIRED_AUTH_VARS}
+        # Load application settings first using Pydantic's standard env var reading
+        app_settings = Settings()
+        startup_log.info("Application settings (DB_SECRET_OCID, OCI_NAMESPACE) loaded.")
+
+        # Use the regex workaround to get OCI auth credentials
+        startup_log.info("Attempting to load OCI auth credentials via regex workaround.")
+        config_values = {key: _get_config_from_env_str(key, env_string) for key in REQUIRED_AUTH_VARS}
         missing_vars = [key for key, value in config_values.items() if not value]
         if missing_vars:
-            raise ConfigurationError(f"Missing OCI auth config variables: {missing_vars}")
+            raise ConfigurationError(f"Missing OCI auth config variables via workaround: {missing_vars}")
 
         base64_body = config_values["OCI_PRIVATE_KEY_CONTENT"].replace(PEM_HEADER, "").replace(PEM_FOOTER, "").strip()
         wrapped_body = "\n".join(textwrap.wrap(base64_body, 64))
@@ -146,7 +149,6 @@ def initialize_dependencies():
         oci.config.validate_config(oci_config)
         startup_log.info("OCI API Key configuration validated successfully.")
 
-        # Now use the API Key config for all clients
         object_storage_client = oci.object_storage.ObjectStorageClient(config=oci_config, retry_strategy=standard_retry_strategy)
         secrets_client = oci.secrets.SecretsClient(config=oci_config, retry_strategy=standard_retry_strategy)
         
@@ -155,24 +157,19 @@ def initialize_dependencies():
         for attempt in range(max_retries):
             try:
                 startup_log.info(f"Initializing database connection (attempt {attempt + 1}/{max_retries}).")
-                startup_log.info("Attempting to fetch secret bundle from OCI Vault.")
-                secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
+                secret_bundle = secrets_client.get_secret_bundle(secret_id=app_settings.DB_SECRET_OCID, stage="LATEST")
                 secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
                 db_config = DbSecret.model_validate(json.loads(secret_content))
                 
-                startup_log.info("Secret bundle fetched. Preparing database connection string.", extra={
-                    "db_host": db_config.host, "db_port": db_config.port, "db_user": db_config.username
-                })
                 db_connection_string = f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}@{db_config.host}:{db_config.port}/{db_config.dbname}"
                 engine = create_engine(db_connection_string, pool_pre_ping=True, connect_args={"connect_timeout": 10})
                 
-                startup_log.info("Attempting to establish and validate database connection.")
                 with engine.connect() as connection:
                     db_version = connection.execute(text("SELECT version()")).scalar()
                 
                 startup_log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
                 db_engine = engine
-                return # Success, exit the loop
+                return
             except Exception as e:
                 startup_log.error(f"Failed to initialize database on attempt {attempt + 1}: {e}", exc_info=True)
                 if attempt < max_retries - 1:
@@ -181,12 +178,9 @@ def initialize_dependencies():
                     startup_log.critical("All attempts to initialize database failed during startup.")
                     raise
     finally:
-        # Clean up the temporary PEM file
         if key_file_path and os.path.exists(key_file_path):
             os.remove(key_file_path)
             startup_log.info(f"Removed temporary key file: {key_file_path}")
-
-# --- All subsequent helper functions and FastAPI app definition are unchanged ---
 
 def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClient, settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
@@ -329,5 +323,5 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    print("--- Starting local development server on http://0.0.0.0:8080 ---")
+    print("--- Starting local development server on http://0.log-applications-rag-project.0:8080 ---")
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
