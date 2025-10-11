@@ -1,4 +1,3 @@
-# main.py - v2.3
 
 import os
 import base64
@@ -7,6 +6,8 @@ import io
 import json
 import logging
 import re
+import tempfile
+import textwrap
 import time
 import traceback
 import uuid
@@ -29,6 +30,12 @@ from pgvector.sqlalchemy import Vector
 
 # --- 0. Application-Specific Constants ---
 VECTOR_DIMENSION = 1024
+REQUIRED_AUTH_VARS = [
+    "OCI_USER_OCID", "OCI_FINGERPRINT", "OCI_TENANCY_OCID",
+    "OCI_REGION", "OCI_PRIVATE_KEY_CONTENT"
+]
+PEM_HEADER = "-----BEGIN RSA PRIVATE KEY-----"
+PEM_FOOTER = "-----END RSA PRIVATE KEY-----"
 
 # --- 1. Advanced Structured Logging (No changes) ---
 class JSONFormatter(logging.Formatter):
@@ -107,6 +114,7 @@ def get_settings() -> Settings:
 def initialize_dependencies():
     global db_engine, object_storage_client, app_settings
     startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
+    key_file_path = None
 
     try:
         settings = Settings()
@@ -115,61 +123,71 @@ def initialize_dependencies():
             "DB_SECRET_OCID": settings.DB_SECRET_OCID,
             "OCI_NAMESPACE": settings.OCI_NAMESPACE
         })
-    except pydantic.ValidationError as e:
-        raise ConfigurationError(f"Invalid configuration during startup: {e}") from e
 
-    # --- REFACTORED: Initialize OCI clients using production-standard Resource Principals ---
-    signer = None
-    oci_config = {}  # OCI SDK clients require a config dict, even if empty for RP.
+        # --- REFACTORED: Initialize OCI clients using API Key Authentication ---
+        startup_log.info("Initializing OCI clients using API Key for authentication.")
+        config_values = {key: os.environ.get(key) for key in REQUIRED_AUTH_VARS}
+        missing_vars = [key for key, value in config_values.items() if not value]
+        if missing_vars:
+            raise ConfigurationError(f"Missing OCI auth config variables: {missing_vars}")
 
-    startup_log.info("Initializing OCI clients using Resource Principal for authentication.")
-    try:
-        signer = oci.auth.signers.get_resource_principals_signer()
-        startup_log.info("Successfully initialized Resource Principals signer.")
-    except Exception as e:
-        # Dump relevant environment variables if RP fails for easier debugging.
-        env_vars = {k: v for k, v in os.environ.items() if "OCI" in k or "FN" in k}
-        startup_log.critical(
-            "Failed to get Resource Principals signer. This indicates a potential IAM or VCN networking issue.",
-            extra={"underlying_error": str(e), "relevant_env_vars": env_vars}
-        )
-        raise ConfigurationError("Could not authenticate with OCI Resource Principals.") from e
+        base64_body = config_values["OCI_PRIVATE_KEY_CONTENT"].replace(PEM_HEADER, "").replace(PEM_FOOTER, "").strip()
+        wrapped_body = "\n".join(textwrap.wrap(base64_body, 64))
+        private_key_content = f"{PEM_HEADER}\n{wrapped_body}\n{PEM_FOOTER}\n"
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
+            key_file.write(private_key_content)
+            key_file_path = key_file.name
 
-    # Now use the determined signer and config for all clients
-    object_storage_client = oci.object_storage.ObjectStorageClient(config=oci_config, signer=signer, retry_strategy=standard_retry_strategy)
-    
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            startup_log.info(f"Initializing database connection (attempt {attempt + 1}/{max_retries}).")
-            secrets_client = oci.secrets.SecretsClient(config=oci_config, signer=signer, retry_strategy=standard_retry_strategy)
-            
-            startup_log.info("Attempting to fetch secret bundle from OCI Vault.")
-            secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
-            secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
-            db_config = DbSecret.model_validate(json.loads(secret_content))
-            
-            startup_log.info("Secret bundle fetched. Preparing database connection string.", extra={
-                "db_host": db_config.host, "db_port": db_config.port, "db_user": db_config.username
-            })
-            db_connection_string = f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}@{db_config.host}:{db_config.port}/{db_config.dbname}"
-            engine = create_engine(db_connection_string, pool_pre_ping=True, connect_args={"connect_timeout": 10})
-            
-            startup_log.info("Attempting to establish and validate database connection.")
-            with engine.connect() as connection:
-                db_version = connection.execute(text("SELECT version()")).scalar()
-            
-            startup_log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
-            db_engine = engine
-            return # Success, exit the loop
-        except Exception as e:
-            startup_log.error(f"Failed to initialize database on attempt {attempt + 1}: {e}", exc_info=True)
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                startup_log.critical("All attempts to initialize database failed during startup.")
-                raise
+        oci_config = {
+            "user": config_values["OCI_USER_OCID"], "key_file": key_file_path,
+            "fingerprint": config_values["OCI_FINGERPRINT"], "tenancy": config_values["OCI_TENANCY_OCID"],
+            "region": config_values["OCI_REGION"]
+        }
+        oci.config.validate_config(oci_config)
+        startup_log.info("OCI API Key configuration validated successfully.")
+
+        # Now use the API Key config for all clients
+        object_storage_client = oci.object_storage.ObjectStorageClient(config=oci_config, retry_strategy=standard_retry_strategy)
+        secrets_client = oci.secrets.SecretsClient(config=oci_config, retry_strategy=standard_retry_strategy)
+        
+        # --- Database initialization logic (unchanged) ---
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                startup_log.info(f"Initializing database connection (attempt {attempt + 1}/{max_retries}).")
+                startup_log.info("Attempting to fetch secret bundle from OCI Vault.")
+                secret_bundle = secrets_client.get_secret_bundle(secret_id=settings.DB_SECRET_OCID, stage="LATEST")
+                secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
+                db_config = DbSecret.model_validate(json.loads(secret_content))
                 
+                startup_log.info("Secret bundle fetched. Preparing database connection string.", extra={
+                    "db_host": db_config.host, "db_port": db_config.port, "db_user": db_config.username
+                })
+                db_connection_string = f"postgresql+psycopg://{db_config.username}:{db_config.password.get_secret_value()}@{db_config.host}:{db_config.port}/{db_config.dbname}"
+                engine = create_engine(db_connection_string, pool_pre_ping=True, connect_args={"connect_timeout": 10})
+                
+                startup_log.info("Attempting to establish and validate database connection.")
+                with engine.connect() as connection:
+                    db_version = connection.execute(text("SELECT version()")).scalar()
+                
+                startup_log.info("Database engine initialized and connection validated.", extra={"db_version": db_version})
+                db_engine = engine
+                return # Success, exit the loop
+            except Exception as e:
+                startup_log.error(f"Failed to initialize database on attempt {attempt + 1}: {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    startup_log.critical("All attempts to initialize database failed during startup.")
+                    raise
+    finally:
+        # Clean up the temporary PEM file
+        if key_file_path and os.path.exists(key_file_path):
+            os.remove(key_file_path)
+            startup_log.info(f"Removed temporary key file: {key_file_path}")
+
+# --- All subsequent helper functions and FastAPI app definition are unchanged ---
+
 def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClient, settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
@@ -280,10 +298,7 @@ async def handle_invocation(
     engine: Engine = Depends(get_db_engine),
     os_client: oci.object_storage.ObjectStorageClient = Depends(get_os_client)
 ):
-
-    print("--- CAPTURE THIS TEST LOG ---") # ADD THIS LINE
     log.info("Function invocation started.")
-        
     try:
         body_bytes = await request.body()
         if not body_bytes:
