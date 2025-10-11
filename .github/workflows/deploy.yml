@@ -73,9 +73,16 @@ jobs:
           exit 1
         fi
 
-        echo "Updating function $FUNCTION_OCID with new image..."
+        echo "Updating function $FUNCTION_OCID with new image and configuration..."
         oci fn function update \
           --function-id "$FUNCTION_OCID" \
-          --image "${{ env.FULL_IMAGE_NAME }}"
+          --image "${{ env.FULL_IMAGE_NAME }}" \
+          --set-config "DB_SECRET_OCID=${{ secrets.DB_SECRET_OCID }}" \
+          --set-config "OCI_NAMESPACE=${{ secrets.OCI_NAMESPACE }}" \
+          --set-config "OCI_USER_OCID=${{ secrets.OCI_USER_OCID }}" \
+          --set-config "OCI_FINGERPRINT=${{ secrets.OCI_FINGERPRINT }}" \
+          --set-config "OCI_TENANCY_OCID=${{ secrets.OCI_TENANCY_OCID }}" \
+          --set-config "OCI_REGION=${{ secrets.OCI_REGION }}" \
+          --set-config "OCI_PRIVATE_KEY_CONTENT=${{ secrets.OCI_PRIVATE_KEY_CONTENT }}"
 
         echo "✅ Application update successful!"
