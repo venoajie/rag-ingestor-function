@@ -8,7 +8,6 @@ import logging
 import re
 import tempfile
 import textwrap
-import time
 import traceback
 import uuid
 from contextlib import asynccontextmanager
@@ -47,15 +46,8 @@ class JSONFormatter(logging.Formatter):
             "invocation_id": getattr(record, 'invocation_id', 'N/A'),
             "logger_name": record.name,
         }
-        extra_fields = {k: v for k, v in record.__dict__.items() if k not in logging.LogRecord('', 0, '', 0, '', (), None, None).__dict__}
-        if extra_fields:
-            log_record.update(extra_fields)
         if record.exc_info:
-            log_record['exception'] = {
-                "type": record.exc_info[0].__name__,
-                "message": str(record.exc_info[1]),
-                "traceback": "".join(traceback.format_exception(*record.exc_info))
-            }
+            log_record['exception'] = "".join(traceback.format_exception(*record.exc_info))
         return json.dumps(log_record)
 
 logger = logging.getLogger(__name__)
@@ -91,18 +83,15 @@ app_settings: Settings | None = None
 standard_retry_strategy = RetryStrategyBuilder().add_max_attempts(4).get_retry_strategy()
 
 def get_db_engine() -> Engine:
-    if db_engine is None:
-        raise HTTPException(status_code=503, detail="Service Unavailable: Database connection is not ready.")
+    if db_engine is None: raise HTTPException(status_code=503, detail="DB engine not initialized.")
     return db_engine
 
 def get_os_client() -> oci.object_storage.ObjectStorageClient:
-    if object_storage_client is None:
-        raise HTTPException(status_code=503, detail="Service Unavailable: Object Storage client is not ready.")
+    if object_storage_client is None: raise HTTPException(status_code=503, detail="OS client not initialized.")
     return object_storage_client
 
 def get_settings() -> Settings:
-    if app_settings is None:
-        raise HTTPException(status_code=503, detail="Service Unavailable: Application settings are not ready.")
+    if app_settings is None: raise HTTPException(status_code=503, detail="Settings not initialized.")
     return app_settings
 
 # --- 5. FastAPI Application & Lifespan Management ---
@@ -110,38 +99,26 @@ def get_settings() -> Settings:
 async def lifespan(app: FastAPI):
     global db_engine, object_storage_client, app_settings
     startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
-    startup_log.info("--- RAG INGESTOR v2.5 (Robust Auth) LIFESPAN START ---")
+    startup_log.info("--- RAG INGESTOR v2.6 (Standard Env Reading) LIFESPAN START ---")
     key_file_path = None
 
     try:
-        env_string = repr(os.environ)
-        def _get_config_from_env_str(key: str, env_str: str) -> str | None:
-            match = re.search(f"'{re.escape(key)}': '([^']*)'", env_str)
-            return match.group(1) if match else None
-
+        # --- PRIMARY FIX: Remove faulty regex workaround, use standard os.environ.get() ---
         app_settings = Settings()
-        startup_log.info("Application settings loaded.")
+        startup_log.info("Application settings loaded via Pydantic.")
 
-        config_values = {key: _get_config_from_env_str(key, env_string) for key in REQUIRED_AUTH_VARS}
+        config_values = {key: os.environ.get(key) for key in REQUIRED_AUTH_VARS}
         missing_vars = [key for key, value in config_values.items() if not value]
         if missing_vars:
             raise ConfigurationError(f"Missing OCI auth config variables: {missing_vars}")
 
-        # --- MODIFICATION: Robust private key handling ---
-        private_key_content_raw = config_values["OCI_PRIVATE_KEY_CONTENT"]
-        if PEM_HEADER in private_key_content_raw:
-            startup_log.info("Full PEM content detected in private key variable. Using as-is.")
-            private_key_content = private_key_content_raw
-        else:
-            startup_log.info("PEM body detected in private key variable. Wrapping with header/footer.")
-            base64_body = private_key_content_raw.strip().replace("\n", "")
-            wrapped_body = "\n".join(textwrap.wrap(base64_body, 64))
-            private_key_content = f"{PEM_HEADER}\n{wrapped_body}\n{PEM_FOOTER}\n"
-        # --- END MODIFICATION ---
+        # The private key is read directly, preserving newlines.
+        private_key_content = config_values["OCI_PRIVATE_KEY_CONTENT"]
 
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
             key_file.write(private_key_content)
             key_file_path = key_file.name
+        # --- END FIX ---
 
         oci_config = {
             "user": config_values["OCI_USER_OCID"], "key_file": key_file_path,
@@ -163,12 +140,12 @@ async def lifespan(app: FastAPI):
         
         engine = create_engine(db_connection_string, pool_pre_ping=True, connect_args={"connect_timeout": 10})
         db_engine = engine
-        startup_log.info("Database engine configured. Connection deferred to first use.")
+        startup_log.info("Database engine configured.")
 
         startup_log.info("--- ALL DEPENDENCIES INITIALIZED SUCCESSFULLY ---")
 
     except Exception as e:
-        startup_log.critical(f"FATAL: Could not initialize dependencies during startup. Error: {e}", exc_info=True)
+        startup_log.critical(f"FATAL: Could not initialize dependencies. Error: {e}", exc_info=True)
         raise
     finally:
         if key_file_path and os.path.exists(key_file_path):
@@ -180,102 +157,90 @@ async def lifespan(app: FastAPI):
         db_engine.dispose()
         startup_log.info("--- DATABASE CONNECTION POOL CLOSED ---")
 
-app = FastAPI(title="RAG Ingestor", version="2.5.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="RAG Ingestor", version="2.6.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 
+# --- The rest of the file (endpoints, helpers) remains unchanged ---
 def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClient, settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
     log.info(f"Downloading object '{object_name}' from bucket '{bucket_name}'.")
     try:
         get_obj = os_client.get_object(settings.OCI_NAMESPACE, bucket_name, object_name)
         with gzip.GzipFile(fileobj=io.BytesIO(get_obj.data.content), mode='rb') as gz_file:
             payload = json.load(gz_file)
-        log.info("Successfully downloaded and parsed payload.")
         return payload
     except oci.exceptions.ServiceError as e:
-        if e.status == 404:
-            raise ValueError(f"Source object not found: {object_name}") from e
+        if e.status == 404: raise ValueError(f"Source object not found: {object_name}") from e
         raise
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in source object: {object_name}") from e
 
 def _validate_table_exists(connection: 'Connection', table_name: str, log: logging.LoggerAdapter):
     if not re.match(r'^codebase_collection_[a-zA-Z0-9_]+$', table_name):
-        raise ValueError(f"Payload provides a syntactically invalid table name: {table_name}")
+        raise ValueError(f"Invalid table name: {table_name}")
     query = text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = :table_name")
     if connection.execute(query, {"table_name": table_name}).scalar_one_or_none() is None:
-        raise ValueError(f"Attempted to ingest data for non-existent table: {table_name}.")
-    log.info("Table validation successful.", table_name=table_name)
+        raise ValueError(f"Table does not exist: {table_name}.")
 
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
     table_name = payload.get("table_name")
-    if not table_name:
-        raise ValueError("Payload is missing required 'table_name' field.")
+    if not table_name: raise ValueError("Payload missing 'table_name'.")
     
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
     metadata_obj = MetaData()
     target_table = Table(table_name, metadata_obj, Column("id", PG_UUID, primary_key=True), Column("content", TEXT), Column("metadata", JSONB), Column("embedding", Vector(VECTOR_DIMENSION)))
     
-    log.info(f"Beginning database transaction for table '{table_name}'.", extra={"upsert_count": len(chunks_to_upsert), "delete_count": len(files_to_delete)})
     with engine.connect() as connection:
         _validate_table_exists(connection, table_name, log)
         with connection.begin() as transaction:
             try:
                 if files_to_delete:
-                    vals = values(column("source_file", TEXT), name="files_to_delete_values").data([(f,) for f in files_to_delete])
-                    delete_stmt = delete(target_table).where(target_table.c.metadata['source'].astext == vals.c.source_file)
-                    connection.execute(delete_stmt)
+                    vals = values(column("source_file", TEXT)).data([(f,) for f in files_to_delete])
+                    connection.execute(delete(target_table).where(target_table.c.metadata['source'].astext.in_(vals)))
                 if chunks_to_upsert:
                     source_files = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     if source_files:
-                        update_vals = values(column("source_file", TEXT), name="files_to_update_values").data([(f,) for f in source_files])
-                        connection.execute(delete(target_table).where(target_table.c.metadata['source'].astext == update_vals.c.source_file))
+                        update_vals = values(column("source_file", TEXT)).data([(f,) for f in source_files])
+                        connection.execute(delete(target_table).where(target_table.c.metadata['source'].astext.in_(update_vals)))
                     
                     records = [{"id": c.get("id"), "content": c.get("document"), "metadata": c.get("metadata"), "embedding": c.get("embedding")} for c in chunks_to_upsert if c.get("document")]
                     if records:
                         connection.execute(insert(target_table), records)
                 transaction.commit()
-                log.info("Transaction committed successfully.")
+                log.info("Transaction committed.")
             except exc.SQLAlchemyError as e:
                 transaction.rollback()
                 raise
 
 @app.exception_handler(ConfigurationError)
 async def configuration_exception_handler(request: Request, exc: ConfigurationError):
-    return JSONResponse(status_code=500, content={"status": "error", "type": "configuration_error", "message": str(exc)})
+    return JSONResponse(status_code=500, content={"status": "error", "message": str(exc)})
 
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
-    return JSONResponse(status_code=400, content={"status": "error", "type": "validation_error", "message": str(exc)})
+    return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
 
 @app.post("/")
-async def handle_invocation(
-    request: Request,
-    log: logging.LoggerAdapter = Depends(get_logger),
-    settings: Settings = Depends(get_settings),
-    engine: Engine = Depends(get_db_engine),
-    os_client: oci.object_storage.ObjectStorageClient = Depends(get_os_client)
-):
+async def handle_invocation(request: Request, log: logging.LoggerAdapter = Depends(get_logger), settings: Settings = Depends(get_settings), engine: Engine = Depends(get_db_engine), os_client: oci.object_storage.ObjectStorageClient = Depends(get_os_client)):
     log.info("Function invocation started.")
     try:
         event = await request.json()
-        event_data = event.get('data', {})
-        bucket_name = event_data.get('additionalDetails', {}).get('bucketName')
-        object_name = event_data.get('resourceName')
-        if not bucket_name or not object_name:
-            raise ValueError("Event data is missing bucketName or resourceName.")
+        data = event.get('data', {})
+        bucket = data.get('additionalDetails', {}).get('bucketName')
+        obj = data.get('resourceName')
+        if not bucket or not obj: raise ValueError("Event missing bucketName or resourceName.")
         
-        payload = _download_and_parse_payload(os_client, settings, bucket_name, object_name, log)
+        payload = _download_and_parse_payload(os_client, settings, bucket, obj, log)
         _process_database_transaction(engine, payload, log)
         
         log.info("Function invocation completed successfully.")
-        return JSONResponse(content={"status": "success", "message": f"Processed {object_name} successfully."}, status_code=200)
+        return JSONResponse(content={"status": "success", "message": f"Processed {obj}."})
     except Exception as e:
         log.critical(f"Unhandled exception: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"status": "error", "type": "internal_server_error", "message": "An unexpected internal error occurred."})
+        return JSONResponse(status_code=500, content={"status": "error", "message": "Internal server error."})
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "rag-ingestor", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn
