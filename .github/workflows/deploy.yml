@@ -19,9 +19,10 @@ jobs:
 
     - name: 2. Configure OCI CLI
       run: |
-        pip install oci-cli
+        pip install oci-cli        
         mkdir -p ~/.oci
-        printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+        # Use the same secret that the function uses internally
+        printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
 
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
