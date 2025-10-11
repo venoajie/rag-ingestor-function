@@ -20,18 +20,17 @@ jobs:
         sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq
         pip install oci-cli
         mkdir -p ~/.oci
-        printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
-        
+        # Use the same secret that the function uses internally
+        printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
-        # [FIX] Corrected typo from 'giconfig' to 'config'
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
         echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
         
-        chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
-        
+        chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config        
     - name: 3. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
