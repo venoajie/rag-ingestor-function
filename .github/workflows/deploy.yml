@@ -52,6 +52,16 @@ jobs:
         docker push "${{ env.FULL_IMAGE_NAME }}"
 
     - name: 6. Update OCI Function with New Image
+    
+      env:
+        DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
+        OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
+        OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+        OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+        OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        OCI_REGION: ${{ secrets.OCI_REGION }}
+        OCI_PRIVATE_KEY_CONTENT: ${{ secrets.OCI_PRIVATE_KEY_CONTENT }}
+        
       run: |
         echo "Looking up Application OCID for '${{ env.APP_NAME }}'..."
         # [FIX] Appended '|| true' to prevent the script from exiting if the query returns no results.
@@ -75,16 +85,33 @@ jobs:
         fi
 
         echo "Updating function $FUNCTION_OCID with new image and configuration..."
+        
+        # Install jq to safely build the JSON config
+        sudo apt-get update && sudo apt-get install -y jq
+
+        # Build a valid JSON string from the environment variables
+        JSON_CONFIG=$(jq -n \
+          --arg db_secret "$DB_SECRET_OCID" \
+          --arg namespace "$OCI_NAMESPACE" \
+          --arg user_ocid "$OCI_USER_OCID" \
+          --arg fingerprint "$OCI_FINGERPRINT" \
+          --arg tenancy_ocid "$OCI_TENANCY_OCID" \
+          --arg region "$OCI_REGION" \
+          --arg pkey "$OCI_PRIVATE_KEY_CONTENT" \
+          '{
+            "DB_SECRET_OCID": $db_secret,
+            "OCI_NAMESPACE": $namespace,
+            "OCI_USER_OCID": $user_ocid,
+            "OCI_FINGERPRINT": $fingerprint,
+            "OCI_TENANCY_OCID": $tenancy_ocid,
+            "OCI_REGION": $region,
+            "OCI_PRIVATE_KEY_CONTENT": $pkey
+          }')
+
         oci fn function update \
           --function-id "$FUNCTION_OCID" \
           --image "${{ env.FULL_IMAGE_NAME }}" \
-          --config "DB_SECRET_OCID=${{ secrets.DB_SECRET_OCID }}" \
-          --config "OCI_NAMESPACE=${{ secrets.OCI_NAMESPACE }}" \
-          --config "OCI_USER_OCID=${{ secrets.OCI_USER_OCID }}" \
-          --config "OCI_FINGERPRINT=${{ secrets.OCI_FINGERPRINT }}" \
-          --config "OCI_TENANCY_OCID=${{ secrets.OCI_TENANCY_OCID }}" \
-          --config "OCI_REGION=${{ secrets.OCI_REGION }}" \
-          --config "OCI_PRIVATE_KEY_CONTENT=${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" \
+          --config "$JSON_CONFIG" \
           --force
 
         echo "✅ Application update successful!"
