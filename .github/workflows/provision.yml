@@ -102,3 +102,42 @@ jobs:
             --force
         fi
         echo "✅ Provisioning successful!"
+
+        echo "Reading configuration from func.yaml..."
+        MEMORY=$(yq '.memory' func.yaml)
+        TIMEOUT=$(yq '.timeout' func.yaml)
+        echo "Found settings: MEMORY=${MEMORY}, TIMEOUT=${TIMEOUT}"
+
+        # --- BEGIN MODIFICATION ---
+        # Define the full set of configuration arguments using the correct --config flag
+        CONFIG_ARGS=(
+          --config "DB_SECRET_OCID=${{ secrets.DB_SECRET_OCID }}"
+          --config "OCI_NAMESPACE=${{ secrets.OCI_NAMESPACE }}"
+          --config "OCI_USER_OCID=${{ secrets.OCI_USER_OCID }}"
+          --config "OCI_FINGERPRINT=${{ secrets.OCI_FINGERPRINT }}"
+          --config "OCI_TENANCY_OCID=${{ secrets.OCI_TENANCY_OCID }}"
+          --config "OCI_REGION=${{ secrets.OCI_REGION }}"
+          --config "OCI_PRIVATE_KEY_CONTENT=${{ secrets.OCI_PRIVATE_KEY_CONTENT }}"
+        )
+        # --- END MODIFICATION ---
+
+        if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "None" ]; then
+          echo "Function not found. Creating it with full configuration..."
+          oci fn function create \
+            --application-id "$APP_OCID" \
+            --display-name "${{ env.FUNCTION_NAME }}" \
+            --image "${{ env.FULL_IMAGE_NAME }}" \
+            --memory-in-mbs "$MEMORY" \
+            --timeout-in-seconds "$TIMEOUT" \
+            "${CONFIG_ARGS[@]}" # <-- APPLY CONFIG ARGS
+        else
+          echo "Function found. Updating it with full configuration..."
+          oci fn function update \
+            --function-id "$FUNCTION_OCID" \
+            --image "${{ env.FULL_IMAGE_NAME }}" \
+            --memory-in-mbs "$MEMORY" \
+            --timeout-in-seconds "$TIMEOUT" \
+            "${CONFIG_ARGS[@]}" # <-- APPLY CONFIG ARGS
+            --force
+        fi
+        echo "✅ Provisioning successful!"
