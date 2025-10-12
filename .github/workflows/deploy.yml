@@ -19,9 +19,16 @@ jobs:
 
     - name: 2. Configure OCI CLI
       run: |
-        # --- FIX: Force install a specific, recent version of oci-cli ---
         pip install oci-cli==3.40.0
         
+        # --- FIX: Add the user's local bin directory to the PATH ---
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        
+        # --- Verification Step ---
+        echo "Verifying OCI CLI path and version..."
+        which oci
+        oci --version
+
         mkdir -p ~/.oci
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
 
