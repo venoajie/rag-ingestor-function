@@ -20,7 +20,6 @@ jobs:
         sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq
         pip install oci-cli
         mkdir -p ~/.oci
-        # Use the same secret that the function uses internally
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
 
         echo "[DEFAULT]" > ~/.oci/config
@@ -50,15 +49,10 @@ jobs:
         docker push "${{ env.FULL_IMAGE_NAME }}"
 
     - name: 6. Create or Update OCI Function
-    
       env:
+        # --- REFACTOR: Removed OCI API Key variables. Function now uses Resource Principals. ---
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
-        OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
-        OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-        OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-        OCI_REGION: ${{ secrets.OCI_REGION }}
-        OCI_PRIVATE_KEY_CONTENT: ${{ secrets.OCI_PRIVATE_KEY_CONTENT }}
         
       run: |
         echo "Looking up Application OCID for '${{ env.APP_NAME }}'..."
@@ -77,40 +71,29 @@ jobs:
         MEMORY=$(yq '.memory' func.yaml)
         TIMEOUT=$(yq '.timeout' func.yaml)
 
-        # --- BEGIN FIX ---
-        # Install jq, which was missing
         echo "Installing jq..."
         sudo apt-get update && sudo apt-get install -y jq
-        # --- END FIX ---
 
+        # --- REFACTOR: Simplified JSON config. Removed API key values. ---
         echo "Building JSON configuration for the function..."
         JSON_CONFIG=$(jq -n \
           --arg db_secret "$DB_SECRET_OCID" \
           --arg namespace "$OCI_NAMESPACE" \
-          --arg user_ocid "$OCI_USER_OCID" \
-          --arg fingerprint "$OCI_FINGERPRINT" \
-          --arg tenancy_ocid "$OCI_TENANCY_OCID" \
-          --arg region "$OCI_REGION" \
-          --arg pkey "$OCI_PRIVATE_KEY_CONTENT" \
           '{
             "DB_SECRET_OCID": $db_secret,
-            "OCI_NAMESPACE": $namespace,
-            "OCI_USER_OCID": $user_ocid,
-            "OCI_FINGERPRINT": $fingerprint,
-            "OCI_TENANCY_OCID": $tenancy_ocid,
-            "OCI_REGION": $region,
-            "OCI_PRIVATE_KEY_CONTENT": $pkey
+            "OCI_NAMESPACE": $namespace
           }')
 
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "None" ]; then
-          echo "Function not found. Creating it..."
+          echo "Function not found. Creating it with Resource Principal authentication..."
           oci fn function create \
             --application-id "$APP_OCID" \
             --display-name "${{ env.FUNCTION_NAME }}" \
             --image "${{ env.FULL_IMAGE_NAME }}" \
             --memory-in-mbs "$MEMORY" \
             --timeout-in-seconds "$TIMEOUT" \
-            --config "$JSON_CONFIG"
+            --config "$JSON_CONFIG" \
+            --auth-provider "resource_principal" # --- ADDED: Enable Resource Principals on create ---
         else
           echo "Function found. Updating it..."
           oci fn function update \

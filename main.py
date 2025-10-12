@@ -6,8 +6,6 @@ import io
 import json
 import logging
 import re
-import tempfile
-import textwrap
 import traceback
 import uuid
 from contextlib import asynccontextmanager
@@ -15,6 +13,7 @@ from datetime import datetime
 from typing import Annotated
 
 import oci
+import oci.auth.signers
 import oci.exceptions
 import pydantic
 import pydantic_settings
@@ -29,12 +28,6 @@ from pgvector.sqlalchemy import Vector
 
 # --- 0. Application-Specific Constants ---
 VECTOR_DIMENSION = 1024
-REQUIRED_AUTH_VARS = [
-    "OCI_USER_OCID", "OCI_FINGERPRINT", "OCI_TENANCY_OCID",
-    "OCI_REGION", "OCI_PRIVATE_KEY_CONTENT"
-]
-PEM_HEADER = "-----BEGIN RSA PRIVATE KEY-----"
-PEM_FOOTER = "-----END RSA PRIVATE KEY-----"
 
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
@@ -99,39 +92,21 @@ def get_settings() -> Settings:
 async def lifespan(app: FastAPI):
     global db_engine, object_storage_client, app_settings
     startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
-    startup_log.info("--- RAG INGESTOR v2.6 (Standard Env Reading) LIFESPAN START ---")
-    key_file_path = None
+    startup_log.info("--- RAG INGESTOR v3.0 (Resource Principal) LIFESPAN START ---")
 
     try:
-        # --- PRIMARY FIX: Remove faulty regex workaround, use standard os.environ.get() ---
+        # --- REFACTOR: Use Resource Principals for authentication ---
         app_settings = Settings()
         startup_log.info("Application settings loaded via Pydantic.")
 
-        config_values = {key: os.environ.get(key) for key in REQUIRED_AUTH_VARS}
-        missing_vars = [key for key, value in config_values.items() if not value]
-        if missing_vars:
-            raise ConfigurationError(f"Missing OCI auth config variables: {missing_vars}")
+        signer = oci.auth.signers.get_resource_principals_signer()
+        startup_log.info("OCI Resource Principal Signer acquired.")
 
-        # The private key is read directly, preserving newlines.
-        private_key_content = config_values["OCI_PRIVATE_KEY_CONTENT"]
+        object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
+        secrets_client = oci.secrets.SecretsClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
+        startup_log.info("OCI clients initialized using Resource Principal.")
+        # --- END REFACTOR ---
 
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
-            key_file.write(private_key_content)
-            key_file_path = key_file.name
-        # --- END FIX ---
-
-        oci_config = {
-            "user": config_values["OCI_USER_OCID"], "key_file": key_file_path,
-            "fingerprint": config_values["OCI_FINGERPRINT"], "tenancy": config_values["OCI_TENANCY_OCID"],
-            "region": config_values["OCI_REGION"]
-        }
-        oci.config.validate_config(oci_config)
-        startup_log.info("OCI API Key configuration validated.")
-
-        object_storage_client = oci.object_storage.ObjectStorageClient(config=oci_config, retry_strategy=standard_retry_strategy)
-        secrets_client = oci.secrets.SecretsClient(config=oci_config, retry_strategy=standard_retry_strategy)
-        startup_log.info("OCI clients initialized.")
-        
         secret_bundle = secrets_client.get_secret_bundle(secret_id=app_settings.DB_SECRET_OCID, stage="LATEST")
         secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
         db_config = DbSecret.model_validate(json.loads(secret_content))
@@ -147,9 +122,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_log.critical(f"FATAL: Could not initialize dependencies. Error: {e}", exc_info=True)
         raise
-    finally:
-        if key_file_path and os.path.exists(key_file_path):
-            os.remove(key_file_path)
 
     yield
     
@@ -157,7 +129,7 @@ async def lifespan(app: FastAPI):
         db_engine.dispose()
         startup_log.info("--- DATABASE CONNECTION POOL CLOSED ---")
 
-app = FastAPI(title="RAG Ingestor", version="2.6.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="RAG Ingestor", version="3.0.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 # --- The rest of the file (endpoints, helpers) remains unchanged ---
 def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClient, settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
