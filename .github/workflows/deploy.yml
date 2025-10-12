@@ -19,10 +19,8 @@ jobs:
 
     - name: 2. Configure OCI CLI
       run: |
-        # --- FIX: Correctly pass arguments to the OCI CLI installer script ---
-        bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
-        
-        echo "/home/runner/bin" >> $GITHUB_PATH
+        # --- FIX: Force install a specific, recent version of oci-cli ---
+        pip install oci-cli==3.40.0
         
         mkdir -p ~/.oci
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
