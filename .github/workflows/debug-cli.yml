@@ -1,0 +1,61 @@
+
+name: '[Diagnostic] Verify OCI CLI Environment'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose-environment:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 1. Check out repository
+      uses: actions/checkout@v4
+
+    - name: 2. Initial Environment State
+      run: |
+        echo "--- Initial State ---"
+        echo "Runner OS: $(uname -a)"
+        echo "Shell: $SHELL"
+        echo "Initial PATH: $PATH"
+        echo "Searching for pre-existing OCI CLI..."
+        which oci || echo "OK: oci command not found initially."
+        echo "---------------------"
+
+    - name: 3. Attempt to Install/Upgrade OCI CLI
+      run: |
+        echo "--- Installation Step ---"
+        # Using the official bash installer is more robust than pip in CI
+        bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+        echo "-------------------------"
+
+    - name: 4. Post-Installation Environment State
+      run: |
+        echo "--- Post-Installation State ---"
+        echo "Adding OCI to PATH for this session..."
+        # The installer modifies .bashrc, but that isn't sourced automatically.
+        # We must manually add the installed location to the PATH for subsequent steps.
+        export PATH="/home/runner/lib/oracle-cli/bin:$PATH"
+        
+        echo "Updated PATH: $PATH"
+        echo "Searching for OCI CLI executable..."
+        which oci
+        echo "-----------------------------"
+
+    - name: 5. The Definitive Test
+      run: |
+        echo "--- The Definitive Test ---"
+        export PATH="/home/runner/lib/oracle-cli/bin:$PATH"
+        
+        echo "Verifying version of located OCI CLI..."
+        oci --version
+
+        echo "Checking for '--enable-resource-principal' flag..."
+        if oci fn function create --help | grep -q 'enable-resource-principal'; then
+          echo "✅ SUCCESS: The '--enable-resource-principal' flag was found."
+          exit 0
+        else
+          echo "❌ FAILURE: The '--enable-resource-principal' flag was NOT found."
+          echo "This confirms the CLI executable being run is outdated or incorrect."
+          exit 1
+        fi
+        echo "---------------------------"
