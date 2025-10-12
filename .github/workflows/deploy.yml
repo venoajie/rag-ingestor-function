@@ -83,7 +83,6 @@ jobs:
             "OCI_NAMESPACE": $namespace
           }')
 
-        # --- FIX: Removed the invalid --auth-provider flag ---
         oci fn function update \
           --function-id "$FUNCTION_OCID" \
           --image "${{ env.FULL_IMAGE_NAME }}" \
