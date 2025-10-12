@@ -19,8 +19,9 @@ jobs:
 
     - name: 2. Configure OCI CLI
       run: |
-        # --- FIX: Use the official installer to get the latest OCI CLI version ---
-        bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" --accept-all-defaults
+        # --- FIX: Correctly pass arguments to the OCI CLI installer script ---
+        bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+        
         echo "/home/runner/bin" >> $GITHUB_PATH
         
         mkdir -p ~/.oci
