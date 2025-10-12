@@ -53,9 +53,9 @@ jobs:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
-        # --- FIX: Consolidate installation and execution into a single step ---
-        echo "Installing a specific, recent version of oci-cli..."
-        pip install oci-cli==3.40.0
+        # --- FIX: Force upgrade to the absolute latest oci-cli from PyPI ---
+        echo "Upgrading to the latest oci-cli..."
+        pip install --upgrade oci-cli
         
         # Add the installation directory to the PATH for this step
         export PATH="$HOME/.local/bin:$PATH"
