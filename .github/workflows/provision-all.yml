@@ -50,7 +50,6 @@ jobs:
       env:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
-        # --- CRITICAL: These secrets must point to your PUBLIC subnet and the function's NSG ---
         PUBLIC_SUBNET_OCID: ${{ secrets.PUBLIC_SUBNET_OCID }}
         FUNCTION_NSG_OCID: ${{ secrets.FUNCTION_NSG_OCID }}
       run: |
@@ -60,7 +59,7 @@ jobs:
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
         
         if [ -z "$APP_OCID" ] || [ "$APP_OCID" == "None" ]; then
-          echo "Application not found. Creating it and linking to the PUBLIC subnet..."
+          echo "Application not found. Creating it..."
           APP_OCID=$(oci fn application create \
             --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} \
             --display-name "${{ env.APP_NAME }}" \
@@ -82,11 +81,11 @@ jobs:
         TIMEOUT=$(yq '.timeout' func.yaml)
         sudo apt-get -qq update && sudo apt-get -qq install -y jq
 
-        # --- FIX: Removed the incorrect OCI_RESOURCE_PRINCIPAL_VERSION key ---
+        # --- CRITICAL FIX: Re-added OCI_RESOURCE_PRINCIPAL_VERSION to enable the feature ---
         JSON_CONFIG=$(jq -n \
           --arg db_secret "$DB_SECRET_OCID" \
           --arg namespace "$OCI_NAMESPACE" \
-          '{"DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
+          '{"DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace, "OCI_RESOURCE_PRINCIPAL_VERSION": "2.2"}')
 
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "None" ]; then
           echo "Function not found. Creating it..."
@@ -98,7 +97,7 @@ jobs:
             --timeout-in-seconds "$TIMEOUT" \
             --config "$JSON_CONFIG"
         else
-          echo "Function found. Updating it..."
+          echo "Function found. Updating it with correct RP configuration..."
           oci fn function update \
             --function-id "$FUNCTION_OCID" \
             --image "${{ env.FULL_IMAGE_NAME }}" \
