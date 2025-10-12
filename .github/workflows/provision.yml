@@ -102,8 +102,7 @@ jobs:
             --image "${{ env.FULL_IMAGE_NAME }}" \
             --memory-in-mbs "$MEMORY" \
             --timeout-in-seconds "$TIMEOUT" \
-            --config "$JSON_CONFIG" \
-            --auth-provider "resource_principal"
+            --config "$JSON_CONFIG"             
         else
           echo "Function found. Updating it..."
           oci fn function update \
