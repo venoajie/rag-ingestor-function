@@ -7,7 +7,7 @@ on:
       - main
 
 env:
-  APP_NAME: "rag-app"
+  APP_NAME: "app-rag"
   FUNCTION_NAME: "rag-ingestor"
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
-        echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+        echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/gpi/config
         echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
@@ -37,18 +37,15 @@ jobs:
         username: ${{ secrets.OCIR_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
-    - name: 4. Set Image Tag Environment Variable
+    - name: 4. Build and Push Docker Image
       run: |
         REPO_NAME=$(echo "${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}" | tr '[:upper:]' '[:lower:]')
         IMAGE_TAG="${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${REPO_NAME}:${{ github.sha }}"
         echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
+        docker build -t "$IMAGE_TAG" .
+        docker push "$IMAGE_TAG"
 
-    - name: 5. Build and Push Docker Image
-      run: |
-        docker build -t "${{ env.FULL_IMAGE_NAME }}" .
-        docker push "${{ env.FULL_IMAGE_NAME }}"
-
-    - name: 6. Update Function Image and Enforce Configuration
+    - name: 5. Update Function Image and Enforce Configuration
       env:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
@@ -56,23 +53,16 @@ jobs:
         echo "Looking up function OCID..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output)
-        
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
           echo "FATAL: Function not found. Run the 'Provision Function' workflow manually first." >&2
           exit 1
         fi
-
         echo "Updating function with new image and enforcing configuration..."
-        JSON_CONFIG=$(jq -n \
-          --arg fn_auth "resource_principal" \
-          --arg db_secret "$DB_SECRET_OCID" \
-          --arg namespace "$OCI_NAMESPACE" \
-          '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
+        JSON_CONFIG=$(jq -n --arg fn_auth "resource_principal" --arg db_secret "$DB_SECRET_OCID" --arg namespace "$OCI_NAMESPACE" '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
+        oci fn function update --function-id "$FUNCTION_OCID" --image "${{ env.FULL_IMAGE_NAME }}" --config "$JSON_CONFIG" --force
 
-        oci fn function update \
-          --function-id "$FUNCTION_OCID" \
-          --image "${{ env.FULL_IMAGE_NAME }}" \
-          --config "$JSON_CONFIG" \
-          --force
-
-        echo "✅ Application update successful!"
+    - name: 6. Wait for IAM Propagation
+      run: |
+        echo "Waiting 60 seconds for IAM service to recognize the updated function..."
+        sleep 60
+        echo "Cooldown complete."
