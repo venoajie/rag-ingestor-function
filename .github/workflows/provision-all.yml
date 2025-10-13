@@ -32,12 +32,18 @@ jobs:
         # Install Fn Project CLI
         curl -LSs https://raw.githubusercontent.com/fnproject/cli/master/install | sh
 
-    # --- NEW STEP: Configure the Fn CLI to target your OCI tenancy ---
+    # --- CORRECTED STEP: Configure the Fn CLI to target your OCI tenancy ---
     - name: 3. Configure Fn Project CLI Context
       run: |
-        oci fn setup-context \
+        # Create a context named 'oci-context' that points to your OCI tenancy
+        fn create context oci-context \
           --provider oracle \
-          --oracle-compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }}
+          --api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com" \
+          --registry "${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}" \
+          --oracle-compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}"
+        
+        # Activate the newly created context for subsequent fn commands
+        fn use context oci-context
         
     - name: 4. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
