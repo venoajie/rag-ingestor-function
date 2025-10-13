@@ -1,5 +1,4 @@
 
-## .github/workflows/provision-function.yml
 name: 'Provision Full Application Stack (Manual)'
 
 on:
@@ -16,7 +15,7 @@ jobs:
     - name: 1. Check out repository
       uses: actions/checkout@v4
 
-    - name: 2. Configure OCI CLI and Fn Project CLI
+    - name: 2. Configure OCI CLI
       run: |
         pip install --upgrade oci-cli jq
         mkdir -p ~/.oci
@@ -28,20 +27,21 @@ jobs:
         echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
-        curl -LSs https://raw.githubusercontent.com/fnproject/cli/master/install | sh
-
-    - name: 3. Configure Fn Project CLI Context
-      run: |
-        fn create context oci-context --provider oracle --api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com" --registry "${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}"
-        fn use context oci-context
-        fn update context oracle.compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}"
         
-    - name: 4. Log in to OCI Container Registry (OCIR)
+    - name: 3. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
         registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
         username: ${{ secrets.OCIR_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
+
+    - name: 4. Build and Push Docker Image
+      run: |
+        REPO_NAME=$(echo "${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}" | tr '[:upper:]' '[:lower:]')
+        IMAGE_TAG="${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${REPO_NAME}:${{ github.sha }}"
+        echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
+        docker build -t "$IMAGE_TAG" .
+        docker push "$IMAGE_TAG"
 
     - name: 5. Create or Update OCI Function Application
       run: |
@@ -57,28 +57,42 @@ jobs:
           oci fn application update --application-id "$APP_OCID" --subnet-ids "$SUBNET_IDS" --network-security-group-ids "$NSG_IDS" --force
         fi
 
-    - name: 6. Deploy Function Code and Image
-      run: |
-        fn --verbose deploy --app ${{ env.APP_NAME }}
-    
-    - name: 7. Enforce Final Configuration
+    - name: 6. Create or Update OCI Function
       env:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
-        echo "Enforcing final configuration on the function..."
+        echo "Checking for existing function '${{ env.FUNCTION_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output)
         
-        JSON_CONFIG=$(jq -n \
-          --arg fn_auth "resource_principal" \
-          --arg db_secret "$DB_SECRET_OCID" \
-          --arg namespace "$OCI_NAMESPACE" \
-          '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
+        JSON_CONFIG=$(jq -n --arg fn_auth "resource_principal" --arg db_secret "$DB_SECRET_OCID" --arg namespace "$OCI_NAMESPACE" '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
+        
+        if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
+          echo "Function not found. Creating it..."
+          oci fn function create \
+            --application-id "$APP_OCID" \
+            --display-name "${{ env.FUNCTION_NAME }}" \
+            --image "${{ env.FULL_IMAGE_NAME }}" \
+            --memory-in-mbs 1024 \
+            --timeout-in-seconds 120 \
+            --config "$JSON_CONFIG"
+        else
+          echo "Function found. Updating it with new image and configuration..."
+          oci fn function update \
+            --function-id "$FUNCTION_OCID" \
+            --image "${{ env.FULL_IMAGE_NAME }}" \
+            --config "$JSON_CONFIG" \
+            --force
+        fi
+
+    - name: 7. Wait for IAM Propagation
+      run: |
+        echo "Waiting 60 seconds for IAM service to recognize the new/updated function..."
+        sleep 60
+        echo "Cooldown complete."
           
-        oci fn function update \
-          --function-id "$FUNCTION_OCID" \
-          --config "$JSON_CONFIG" \
-          --force
-          
-        echo "✅ Provisioning and configuration enforcement successful!"
+    - name: 8. Final Verification
+      run: |
+        echo "✅ Provisioning successful!"
+        echo "The function is now ready for invocation."
