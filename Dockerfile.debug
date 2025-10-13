@@ -1,10 +1,10 @@
 
-FROM fnproject/python:3.12-dev
+FROM alpine:latest
 
-WORKDIR /function
-ADD . /function/
+# Install curl, the only tool we need for this network test.
+RUN apk add --no-cache curl
 
 # This is the diagnostic command.
-# Instead of starting the web server, it tries to curl the metadata endpoint.
+# It tries to curl the metadata endpoint.
 # The result will be captured in the function logs.
 CMD ["sh", "-c", "curl -v --connect-timeout 10 http://169.254.169.254/opc/v2/instance/"]
