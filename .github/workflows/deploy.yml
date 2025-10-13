@@ -78,10 +78,7 @@ jobs:
         JSON_CONFIG=$(jq -n \
           --arg db_secret "$DB_SECRET_OCID" \
           --arg namespace "$OCI_NAMESPACE" \
-          '{
-            "DB_SECRET_OCID": $db_secret,
-            "OCI_NAMESPACE": $namespace
-          }')
+           '{"DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace, "OCI_RESOURCE_PRINCIPAL_VERSION": "2.2"}')
 
         oci fn function update \
           --function-id "$FUNCTION_OCID" \
