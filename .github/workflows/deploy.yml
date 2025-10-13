@@ -7,7 +7,7 @@ on:
       - main
 
 env:
-  APP_NAME: "app-rag"
+  APP_NAME: "rag-app"
   FUNCTION_NAME: "rag-ingestor"
 
 jobs:
