@@ -44,11 +44,12 @@ jobs:
         docker build -t "$IMAGE_TAG" .
         docker push "$IMAGE_TAG"
 
-    # --- THIS STEP IS CORRECTED ---
+    # --- THIS STEP IS CORRECTED for robustness ---
     - name: 5. Create or Update OCI Function Application
       run: |
         echo "Checking for existing application '${{ env.APP_NAME }}'..."
-        APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" -r || true)
+        # Use full --raw-output flag for consistency
+        APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
         
         if [ -z "$APP_OCID" ] || [ "$APP_OCID" == "null" ]; then
           echo "Application not found. Creating it in the designated function subnet..."
@@ -56,20 +57,20 @@ jobs:
           NSG_IDS='["${{ secrets.FUNCTION_NSG_OCID }}"]'
           oci fn application create --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --subnet-ids "$SUBNET_IDS" --network-security-group-ids "$NSG_IDS"
         else
-          # If the application exists, we do not need to update its subnets.
-          # We can optionally update other mutable properties here if needed in the future (e.g., tags).
-          # For now, just confirming its existence is enough.
           echo "Application found with OCID: $APP_OCID. Proceeding."
         fi
 
+    # --- THIS STEP IS CORRECTED ---
     - name: 6. Create or Update OCI Function
       env:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
         echo "Checking for existing function '${{ env.FUNCTION_NAME }}'..."
-        APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" -r || true)
-        FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" -r || true)
+        # Use full --raw-output flag for consistency
+        APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
+        # Use full --raw-output flag to fix the "No such option: -r" error
+        FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
 
         JSON_CONFIG=$(jq -n --arg fn_auth "resource_principal" --arg db_secret "$DB_SECRET_OCID" --arg namespace "$OCI_NAMESPACE" '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
