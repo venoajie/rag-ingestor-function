@@ -38,11 +38,12 @@ jobs:
     - name: 4. Build and Push Docker Image
       run: |
         REPO_NAME=$(echo "${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}" | tr '[:upper:]' '[:lower:]')
-        IMAGE_TAG="${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${REPO_NAME}:${{ github.sha }}"
+        IMAGE_TAG="${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${REPO_NAME}:${{ github.sha }}-debug"
         echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
-        docker build -t "$IMAGE_TAG" .
+        # --- THIS IS THE ONLY CHANGE ---
+        docker build -t "$IMAGE_TAG" -f Dockerfile.debug .
         docker push "$IMAGE_TAG"
-
+        
     - name: 5. Create or Update OCI Function Application
       run: |
         echo "Checking for existing application '${{ env.APP_NAME }}'..."
