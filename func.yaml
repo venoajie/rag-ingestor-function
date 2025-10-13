@@ -7,5 +7,5 @@ memory: 1024
 timeout: 120
 config:
   FN_AUTH_METHOD: "resource_principal"
-  DB_SECRET_OCID: "ocid1.vaultsecret.oc1.eu-frankfurt-1.amaaaaaaaenu5lyak3zatzikgrvsfmqaap4l7l2khrifejmxrzzdet2yhnfa"
-  OCI_NAMESPACE: "frpowqeyehes"
+  DB_SECRET_OCID: "${DB_SECRET_OCID}"
+  OCI_NAMESPACE: "${OCI_NAMESPACE}"
