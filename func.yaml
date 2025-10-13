@@ -1,7 +1,7 @@
 
 schema_version: 20180708
 name: rag-ingestor
-version: 2.0.8
+version: 2.0.8 # Or your current version
 runtime: docker
 memory: 1024
 timeout: 120
@@ -9,3 +9,5 @@ config:
   FN_AUTH_METHOD: "resource_principal"
   DB_SECRET_OCID: "${DB_SECRET_OCID}"
   OCI_NAMESPACE: "${OCI_NAMESPACE}"
+annotations:
+  oracle.com/oci/subnetIds: '["${PUBLIC_SUBNET_OCID}"]'
