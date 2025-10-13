@@ -32,7 +32,6 @@ jobs:
         # Install Fn Project CLI
         curl -LSs https://raw.githubusercontent.com/fnproject/cli/master/install | sh
 
-    # --- CORRECTED STEP: Configure the Fn CLI to target your OCI tenancy ---
     - name: 3. Configure Fn Project CLI Context
       run: |
         # Create a context named 'oci-context' that points to your OCI tenancy
