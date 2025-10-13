@@ -18,6 +18,7 @@ jobs:
     - name: 2. Configure OCI CLI and Fn Project CLI
       run: |
         # Configure OCI CLI
+        pip install --upgrade oci-cli
         mkdir -p ~/.oci
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
         echo "[DEFAULT]" > ~/.oci/config
@@ -30,25 +31,28 @@ jobs:
         
         # Install Fn Project CLI
         curl -LSs https://raw.githubusercontent.com/fnproject/cli/master/install | sh
+
+    # --- NEW STEP: Configure the Fn CLI to target your OCI tenancy ---
+    - name: 3. Configure Fn Project CLI Context
+      run: |
+        oci fn setup-context \
+          --provider oracle \
+          --oracle-compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }}
         
-    - name: 3. Log in to OCI Container Registry (OCIR)
+    - name: 4. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
       with:
         registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
         username: ${{ secrets.OCIR_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
-    - name: 4. Provision Application and Function via fn deploy
+    - name: 5. Provision Application and Function via fn deploy
       env:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
-        # The fn deploy command handles creating the app, building/pushing the image,
-        # and creating/updating the function based on func.yaml.
-        # It substitutes the env vars into func.yaml before deploying.
         fn --verbose deploy --app ${{ env.APP_NAME }} --create-app
         
-        # Explicitly set network details on the application after creation/update
         echo "Ensuring application is linked to the correct network..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
         oci fn application update \
