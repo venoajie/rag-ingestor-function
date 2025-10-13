@@ -17,7 +17,6 @@ jobs:
 
     - name: 2. Configure OCI CLI and Fn Project CLI
       run: |
-        # Configure OCI CLI
         pip install --upgrade oci-cli
         mkdir -p ~/.oci
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
@@ -29,20 +28,21 @@ jobs:
         echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
         
-        # Install Fn Project CLI
         curl -LSs https://raw.githubusercontent.com/fnproject/cli/master/install | sh
 
     - name: 3. Configure Fn Project CLI Context
       run: |
-        # Create a context named 'oci-context' that points to your OCI tenancy
+        # Step 3.1: Create a context with the generic, version-compatible flags
         fn create context oci-context \
           --provider oracle \
           --api-url "https://functions.${{ secrets.OCI_REGION }}.oci.oraclecloud.com" \
-          --registry "${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}" \
-          --oracle-compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}"
+          --registry "${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}"
         
-        # Activate the newly created context for subsequent fn commands
+        # Step 3.2: Activate the context
         fn use context oci-context
+        
+        # Step 3.3: Update the active context with the OCI-specific compartment ID
+        fn update context oracle.compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}"
         
     - name: 4. Log in to OCI Container Registry (OCIR)
       uses: docker/login-action@v3
