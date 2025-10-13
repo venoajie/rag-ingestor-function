@@ -7,7 +7,7 @@ on:
       - main
 
 env:
-  APP_NAME: "rag-ingestor"
+  APP_NAME: "app-rag"
   FUNCTION_NAME: "rag-ingestor"
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
 
     - name: 2. Configure OCI CLI
       run: |
-        pip install --upgrade oci-cli
+        pip install --upgrade oci-cli jq
         mkdir -p ~/.oci
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
         echo "[DEFAULT]" > ~/.oci/config
@@ -48,21 +48,31 @@ jobs:
         docker build -t "${{ env.FULL_IMAGE_NAME }}" .
         docker push "${{ env.FULL_IMAGE_NAME }}"
 
-    - name: 6. Update OCI Function with New Image Only
+    - name: 6. Update Function Image and Enforce Configuration
+      env:
+        DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
+        OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
-        echo "Looking up Application and Function OCIDs..."
+        echo "Looking up function OCID..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output)
         
-        if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "None" ]; then
-          echo "FATAL: Function '${{ env.FUNCTION_NAME }}' not found. Run the 'Provision Function' workflow manually first." >&2
+        if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
+          echo "FATAL: Function not found. Run the 'Provision Function' workflow manually first." >&2
           exit 1
         fi
 
-        echo "Updating function $FUNCTION_OCID with new image..."
+        echo "Updating function with new image and enforcing configuration..."
+        JSON_CONFIG=$(jq -n \
+          --arg fn_auth "resource_principal" \
+          --arg db_secret "$DB_SECRET_OCID" \
+          --arg namespace "$OCI_NAMESPACE" \
+          '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
+
         oci fn function update \
           --function-id "$FUNCTION_OCID" \
           --image "${{ env.FULL_IMAGE_NAME }}" \
+          --config "$JSON_CONFIG" \
           --force
 
         echo "✅ Application update successful!"
