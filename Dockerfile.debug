@@ -1,0 +1,10 @@
+
+FROM fnproject/python:3.12-dev
+
+WORKDIR /function
+ADD . /function/
+
+# This is the diagnostic command.
+# Instead of starting the web server, it tries to curl the metadata endpoint.
+# The result will be captured in the function logs.
+CMD ["sh", "-c", "curl -v --connect-timeout 10 http://169.254.169.254/opc/v2/instance/"]
