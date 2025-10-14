@@ -7,6 +7,7 @@ on:
 env:
   APP_NAME: "app-rag"
   FUNCTION_NAME: "rag-ingestor"
+  NSG_NAME: "rag-app-fn-nsg"
 
 jobs:
   provision-stack:
@@ -18,14 +19,10 @@ jobs:
     - name: 2. Configure OCI CLI
       run: |
         pip install --upgrade oci-cli jq
-        mkdir -p ~/.oci
-        printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
-        echo "[DEFAULT]" > ~/.oci/config
-        echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
-        echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-        echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
-        echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
-        echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+        mkdir -p ~/.oci; printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+        echo "[DEFAULT]" > ~/.oci/config; echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
+        echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config; echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+        echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config; echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
 
     - name: 3. Log in to OCI Container Registry (OCIR)
@@ -43,98 +40,66 @@ jobs:
         docker build -t "$IMAGE_TAG" .
         docker push "$IMAGE_TAG"
 
-    # --- NEW STEP: Proven automation based on successful manual test ---
-    - name: 5a. Ensure Service Gateway Route for Private Subnet
+    - name: 5a. Ensure Final Route Table Configuration (SGW and NAT)
+      run: |
+        set -e; SUBNET_DETAILS=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}")
+        ROUTE_TABLE_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."route-table-id"'); VCN_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."vcn-id"')
+        VCN_DETAILS=$(oci network vcn get --vcn-id "$VCN_OCID"); VCN_COMPARTMENT_OCID=$(echo "$VCN_DETAILS" | jq -r '.data."compartment-id"')
+        SERVICE_GATEWAY_OCID=$(oci network service-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output); if [ -z "$SERVICE_GATEWAY_OCID" ]; then echo "Error: No Service Gateway found" >&2; exit 1; fi
+        NAT_GATEWAY_OCID=$(oci network nat-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output); if [ -z "$NAT_GATEWAY_OCID" ]; then echo "Error: No NAT Gateway found" >&2; exit 1; fi
+        SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output); if [ -z "$SERVICE_CIDR_LABEL" ] || [ "$SERVICE_CIDR_LABEL" == "null" ]; then echo "Error: Could not find Service CIDR Label" >&2; exit 1; fi
+        FINAL_PAYLOAD=$(jq -n --arg sgw_ocid "$SERVICE_GATEWAY_OCID" --arg nat_ocid "$NAT_GATEWAY_OCID" --arg service_cidr "$SERVICE_CIDR_LABEL" '[{"destination": $service_cidr,"destinationType": "SERVICE_CIDR_BLOCK","networkEntityId": $sgw_ocid,"description": "Platform Egress via SGW","routeType": "STATIC"},{"cidrBlock": "0.0.0.0/0","networkEntityId": $nat_ocid,"description": "General Egress via NAT","routeType": "STATIC"}]')
+        oci network route-table update --rt-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force; echo "Successfully enforced final route table configuration."
+
+    - name: 5b. Create or Update NSG and Enforce Correct Egress Rule
       run: |
         set -e
-        echo "Ensuring route table for private subnet has a Service Gateway route..."
-        
-        SUBNET_DETAILS=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}")
-        ROUTE_TABLE_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."route-table-id"')
-        VCN_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."vcn-id"')
-        VCN_DETAILS=$(oci network vcn get --vcn-id "$VCN_OCID")
-        VCN_COMPARTMENT_OCID=$(echo "$VCN_DETAILS" | jq -r '.data."compartment-id"')
-        
-        if [ "$ROUTE_TABLE_OCID" == "null" ] || [ "$VCN_OCID" == "null" ] || [ "$VCN_COMPARTMENT_OCID" == "null" ]; then
-          echo "Error: Could not determine Route Table, VCN, or VCN Compartment OCID."
-          exit 1
+        echo "Ensuring NSG '${{ env.NSG_NAME }}' exists and has the correct egress rule..."
+        NSG_OCID=$(oci network nsg list --compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}" --display-name "${{ env.NSG_NAME }}" --query "data[0].id" --raw-output || true)
+        if [ -z "$NSG_OCID" ]; then
+          echo "NSG not found. Creating it..."
+          VCN_OCID=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}" | jq -r '.data."vcn-id"')
+          NSG_OCID=$(oci network nsg create --compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}" --vcn-id "$VCN_OCID" --display-name "${{ env.NSG_NAME }}" --query "data.id" --raw-output)
         fi
-        
-        SERVICE_GATEWAY_OCID=$(oci network service-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output || true)
-        if [ -z "$SERVICE_GATEWAY_OCID" ]; then
-            echo "Error: No Service Gateway found in VCN ${VCN_OCID}. A Service Gateway is required."
-            exit 1
-        fi
+        echo "NSG_OCID=${NSG_OCID}" >> $GITHUB_ENV
 
-        # Correctly query for the Service CIDR Label
+        # Discover the Service CIDR Label (again, for this self-contained step)
         SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output)
-        if [ -z "$SERVICE_CIDR_LABEL" ] || [ "$SERVICE_CIDR_LABEL" == "null" ]; then
-            echo "Error: Could not find the Service CIDR Label for the service name provided in the OCI_SERVICES_NETWORK_NAME secret."
-            exit 1
-        fi
-        echo "Successfully discovered Service CIDR Label: $SERVICE_CIDR_LABEL"
+        
+        # Define the single, correct egress rule
+        CORRECT_RULE_PAYLOAD=$(jq -n --arg dest "$SERVICE_CIDR_LABEL" '[{"direction": "EGRESS", "protocol": "6", "isStateless": false, "destination": $dest, "destinationType": "SERVICE_CIDR_BLOCK", "tcpOptions": {"destinationPortRange": {"min": 443, "max": 443}}, "description": "Allow runtime egress for RP auth"}]')
+        
+        # This replaces all existing rules with the one correct rule, enforcing a clean state
+        oci network nsg rules update --nsg-id "$NSG_OCID" --security-rules "$CORRECT_RULE_PAYLOAD"
+        echo "Successfully enforced correct egress rule on NSG."
 
-        CURRENT_RULES_RAW=$(oci network route-table get --rt-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
-        RULE_EXISTS=$(echo "$CURRENT_RULES_RAW" | jq --arg sgw_ocid "$SERVICE_GATEWAY_OCID" 'map(select(."network-entity-id" == $sgw_ocid)) | length')
-
-        if [ "$RULE_EXISTS" -gt 0 ]; then
-          echo "Service Gateway route already exists. No changes needed."
-        else
-          echo "Service Gateway route not found. Adding it to the route table."
-          
-          # --- PROVEN REFACTOR: Use jq to construct the payload ---
-          # This creates the exact JSON structure validated by the manual test,
-          # but uses jq to create a single-line string that is safe for the GitHub Actions YAML parser.
-          FINAL_PAYLOAD=$(jq -n \
-            --arg dest "$SERVICE_CIDR_LABEL" \
-            --arg sgw_ocid "$SERVICE_GATEWAY_OCID" \
-            --arg desc "Route to OCI Services via Service Gateway (Managed by CI/CD)" \
-            '[
-              {
-                "destination": $dest,
-                "destinationType": "SERVICE_CIDR_BLOCK",
-                "networkEntityId": $sgw_ocid,
-                "description": $desc,
-                "routeType": "STATIC"
-              }
-            ]')
-
-          echo "Attempting to update with the following payload:"
-          echo "$FINAL_PAYLOAD" | jq .
-          
-          # Use the correct --rt-id parameter
-          oci network route-table update --rt-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force
-          echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
-        fi
-
-    - name: 5b. Create or Recreate OCI Function Application in Private Subnet
+    - name: 5c. Create or Recreate Function Application with NSG
       run: |
         set -e
         echo "Checking for existing application '${{ env.APP_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
-
+        
         CREATE_APP=false
         if [ -z "$APP_OCID" ] || [ "$APP_OCID" == "null" ]; then
           echo "Application not found. It will be created."
           CREATE_APP=true
         else
-          echo "Application found with OCID: $APP_OCID. Verifying its subnet configuration..."
-          CURRENT_SUBNET_OCID=$(oci fn application get --application-id "$APP_OCID" --query "data.\"subnet-ids\"[0]" --raw-output)
-          
-          if [ "$CURRENT_SUBNET_OCID" == "${{ secrets.PRIVATE_SUBNET_OCID }}" ]; then
-            echo "Application is already configured with the correct private subnet. No changes needed."
-          else
-            echo "Application is in the wrong subnet ($CURRENT_SUBNET_OCID). Deleting it to be recreated."
+          echo "Application found. Verifying network configuration..."
+          APP_DETAILS=$(oci fn application get --application-id "$APP_OCID" --query "data")
+          CURRENT_SUBNET=$(echo "$APP_DETAILS" | jq -r '."subnet-ids"[0]')
+          CURRENT_NSG=$(echo "$APP_DETAILS" | jq -r '."network-security-group-ids"[0]')
+          if [ "$CURRENT_SUBNET" != "${{ secrets.PRIVATE_SUBNET_OCID }}" ] || [ "$CURRENT_NSG" != "${{ env.NSG_OCID }}" ]; then
+            echo "Application has incorrect network config. Recreating it."
             oci fn application delete --application-id "$APP_OCID" --force
-            echo "Deletion complete. Application will be recreated."
             CREATE_APP=true
+          else
+            echo "Application network config is correct."
           fi
         fi
 
         if [ "$CREATE_APP" = true ]; then
-          echo "Creating application in the designated PRIVATE function subnet..."
-          SUBNET_IDS='["${{ secrets.PRIVATE_SUBNET_OCID }}"]'
-          oci fn application create --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --subnet-ids "$SUBNET_IDS"
+          echo "Creating application with private subnet and NSG..."
+          oci fn application create --compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}" --display-name "${{ env.APP_NAME }}" --subnet-ids '["${{ secrets.PRIVATE_SUBNET_OCID }}"]' --network-security-group-ids '["${{ env.NSG_OCID }}"]'
         fi
 
     - name: 6. Create or Update OCI Function
@@ -142,16 +107,12 @@ jobs:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
-        echo "Checking for existing function '${{ env.FUNCTION_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
-
-        JSON_CONFIG=$(jq -n --arg fn_auth "resource_principal" --arg db_secret "$DB_SECRET_OCID" --arg namespace "$OCI_NAMESPACE" '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
+        JSON_CONFIG=$(jq -n --arg db_secret "$DB_SECRET_OCID" --arg namespace "$OCI_NAMESPACE" '{"DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
-          echo "Function not found. Creating it..."
           oci fn function create --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --image "${{ env.FULL_IMAGE_NAME }}" --memory-in-mbs 1024 --timeout-in-seconds 120 --config "$JSON_CONFIG"
         else
-          echo "Function found. Updating it..."
           oci fn function update --function-id "$FUNCTION_OCID" --image "${{ env.FULL_IMAGE_NAME }}" --config "$JSON_CONFIG" --force
         fi
 
