@@ -44,7 +44,6 @@ jobs:
         docker build -t "$IMAGE_TAG" .
         docker push "$IMAGE_TAG"
 
-    # --- THIS STEP IS CORRECTED for robustness ---
     - name: 5. Create or Update OCI Function Application
       run: |
         echo "Checking for existing application '${{ env.APP_NAME }}'..."
@@ -55,7 +54,7 @@ jobs:
           echo "Application not found. Creating it in the designated function subnet..."
           SUBNET_IDS='["${{ secrets.PUBLIC_SUBNET_OCID }}"]'
           NSG_IDS='["${{ secrets.FUNCTION_NSG_OCID }}"]'
-          #temporarily drop the NSG
+          #temporarily drop the NSG  
           #oci fn application create --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name #"${{ env.APP_NAME }}" --subnet-ids "$SUBNET_IDS" --network-security-group-ids "$NSG_IDS"
           oci fn application create --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --subnet-ids "$SUBNET_IDS" 
         else
