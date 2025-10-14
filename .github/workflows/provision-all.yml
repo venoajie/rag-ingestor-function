@@ -44,6 +44,7 @@ jobs:
         docker push "$IMAGE_TAG"
 
     - name: 5a. Ensure Service Gateway Route for Private Subnet
+    
       run: |
         set -e
         echo "Ensuring route table for private subnet has a Service Gateway route..."
@@ -72,32 +73,38 @@ jobs:
         if [ "$RULE_EXISTS" -gt 0 ]; then
           echo "Service Gateway route already exists. No changes needed."
         else
-          # The route table is empty or does not contain the required rule.
-          # Since the update command replaces all rules, we must preserve any existing, unrelated rules.
-          echo "Service Gateway route not found. Adding it to the route table..."
+          echo "Service Gateway route not found. Adding it to the route table."
+          
+          # --- FINAL REFACTOR: Use a Here Document to construct a clean, foolproof JSON payload ---
+          # This completely avoids all complex jq transformations and provides a direct, verifiable payload.
+          # It assumes the route table may have other rules and preserves them, while adding the mandatory
+          # 'routeType' to all rules in the final payload.
 
-          # Sanitize existing rules to be compliant with the update schema
-          ALLOWED_KEYS='["cidrBlock", "destination", "destinationType", "networkEntityId", "description", "routeType"]'
-          CLEANED_RULES=$(echo "$CURRENT_RULES_RAW" | jq --argjson allowed "$ALLOWED_KEYS" '[.[] | (to_entries | map(select(.key as $k | $allowed | index($k))) | from_entries)]')
+          # Step 1: Sanitize existing rules by adding the missing routeType.
+          # The GET command does not return routeType, but the UPDATE command requires it for all rules.
+          CLEANED_EXISTING_RULES=$(echo "$CURRENT_RULES_RAW" | jq '[.[] | . + {"routeType": "STATIC"}]')
 
-          # Construct the new, perfectly formatted rule
-          NEW_RULE=$(jq -n \
-            --arg dest_ocid "$SERVICE_OCID" \
-            --arg sgw_ocid "$SERVICE_GATEWAY_OCID" \
-            --arg route_type "STATIC" \
-            '{
-              "destination": $dest_ocid,
-              "destinationType": "SERVICE_CIDR_BLOCK",
-              "networkEntityId": $sgw_ocid,
-              "description": "Route to OCI Services via Service Gateway (Managed by CI/CD)",
-              "routeType": $route_type
-            }')
-            
-          UPDATED_RULES=$(echo "$CLEANED_RULES" | jq --argjson rule "$NEW_RULE" '. + [$rule]')
-          oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$UPDATED_RULES" --force
-          echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
+          # Step 2: Construct the new rule as a standalone JSON object.
+          NEW_RULE=$(cat <<EOF
+          {
+            "destination": "${SERVICE_OCID}",
+            "destinationType": "SERVICE_CIDR_BLOCK",
+            "networkEntityId": "${SERVICE_GATEWAY_OCID}",
+            "description": "Route to OCI Services via Service Gateway (Managed by CI/CD)",
+            "routeType": "STATIC"
+          }
+EOF
+          )
+          
+          # Step 3: Combine the cleaned existing rules with the new rule.
+          FINAL_PAYLOAD=$(echo "$CLEANED_EXISTING_RULES" | jq --argjson rule "$NEW_RULE" '. + [$rule]')
+          
+          echo "Attempting to update with the following payload:"
+          echo "$FINAL_PAYLOAD" | jq .
+
+          oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force
+          echo "Successfully updated route table ${ROUTE_TABLE_OCID}."
         fi
-        
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
         set -e
