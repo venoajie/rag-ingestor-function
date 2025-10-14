@@ -65,16 +65,14 @@ jobs:
             exit 1
         fi
 
-        # --- REFACTOR: Use a more robust, single-step JMESPath query to find the CIDR ---
-        # This avoids fragile piping between the OCI CLI and jq.
-        OCI_REGION_UPPER=$(echo "${{ secrets.OCI_REGION }}" | tr 'a-z' 'A-Z')
-        SERVICE_NAME="All ${OCI_REGION_UPPER} Services in Oracle Services Network"
-        DESTINATION_CIDR=$(oci network service list --query "data[?name=='${SERVICE_NAME}'].cidrBlock | [0]" --raw-output)
+        # --- REFACTOR: Use a resilient pattern-based search instead of a fragile exact-name match ---
+        DESTINATION_CIDR=$(oci network service list --query "data[?contains(name, 'All') && contains(name, 'Services in Oracle Services Network')].cidrBlock | [0]" --raw-output)
         
         if [ -z "$DESTINATION_CIDR" ] || [ "$DESTINATION_CIDR" == "null" ]; then
-            echo "Error: Could not find the CIDR for the OCI Services Network named '${SERVICE_NAME}'."
+            echo "Error: Could not find the CIDR for the 'All ... Services in Oracle Services Network' service. Please check service names in your region."
             exit 1
         fi
+        echo "Successfully discovered OCI Services Network CIDR: $DESTINATION_CIDR"
 
         CURRENT_RULES=$(oci network route-table get --route-table-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
         RULE_EXISTS=$(echo "$CURRENT_RULES" | jq --arg sgw_ocid "$SERVICE_GATEWAY_OCID" 'map(select(."network-entity-id" == $sgw_ocid)) | length')
@@ -87,7 +85,7 @@ jobs:
           UPDATED_RULES=$(echo "$CURRENT_RULES" | jq --argjson rule "$NEW_RULE" '. + [$rule]')
           oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$UPDATED_RULES" --force
           echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
-        fi
+        fi       
         
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
