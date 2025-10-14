@@ -42,14 +42,64 @@ jobs:
 
     - name: 5a. Ensure Final Route Table Configuration (SGW and NAT)
       run: |
-        set -e; SUBNET_DETAILS=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}")
-        ROUTE_TABLE_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."route-table-id"'); VCN_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."vcn-id"')
-        VCN_DETAILS=$(oci network vcn get --vcn-id "$VCN_OCID"); VCN_COMPARTMENT_OCID=$(echo "$VCN_DETAILS" | jq -r '.data."compartment-id"')
-        SERVICE_GATEWAY_OCID=$(oci network service-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output); if [ -z "$SERVICE_GATEWAY_OCID" ]; then echo "Error: No Service Gateway found" >&2; exit 1; fi
-        NAT_GATEWAY_OCID=$(oci network nat-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output); if [ -z "$NAT_GATEWAY_OCID" ]; then echo "Error: No NAT Gateway found" >&2; exit 1; fi
-        SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output); if [ -z "$SERVICE_CIDR_LABEL" ] || [ "$SERVICE_CIDR_LABEL" == "null" ]; then echo "Error: Could not find Service CIDR Label" >&2; exit 1; fi
-        FINAL_PAYLOAD=$(jq -n --arg sgw_ocid "$SERVICE_GATEWAY_OCID" --arg nat_ocid "$NAT_GATEWAY_OCID" --arg service_cidr "$SERVICE_CIDR_LABEL" '[{"destination": $service_cidr,"destinationType": "SERVICE_CIDR_BLOCK","networkEntityId": $sgw_ocid,"description": "Platform Egress via SGW","routeType": "STATIC"},{"cidrBlock": "0.0.0.0/0","networkEntityId": $nat_ocid,"description": "General Egress via NAT","routeType": "STATIC"}]')
-        oci network route-table update --rt-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force; echo "Successfully enforced final route table configuration."
+        set -e
+        echo "Enforcing final three-rule (SGW, NAT, DRG) configuration on private route table..."
+        
+        # --- Discover all required OCIDs and Labels ---
+        SUBNET_DETAILS=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}")
+        ROUTE_TABLE_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."route-table-id"')
+        VCN_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."vcn-id"')
+        VCN_DETAILS=$(oci network vcn get --vcn-id "$VCN_OCID")
+        VCN_COMPARTMENT_OCID=$(echo "$VCN_DETAILS" | jq -r '.data."compartment-id"')
+        
+        SERVICE_GATEWAY_OCID=$(oci network service-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output)
+        NAT_GATEWAY_OCID=$(oci network nat-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output)
+        SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output)
+
+        # --- Validate that all necessary resources were found ---
+        if [ -z "$SERVICE_GATEWAY_OCID" ] || [ -z "$NAT_GATEWAY_OCID" ] || [ -z "$SERVICE_CIDR_LABEL" ] || [ -z "${{ secrets.DRG_OCID }}" ]; then
+            echo "Error: One or more required OCIDs (SGW, NAT, DRG) or the Service CIDR Label could not be found." >&2
+            exit 1
+        fi
+        
+        echo "Successfully discovered all necessary network resources."
+
+        # --- Construct the definitive three-rule JSON payload ---
+        FINAL_PAYLOAD=$(jq -n \
+          --arg sgw_ocid "$SERVICE_GATEWAY_OCID" \
+          --arg nat_ocid "$NAT_GATEWAY_OCID" \
+          --arg drg_ocid "${{ secrets.DRG_OCID }}" \
+          --arg service_cidr "$SERVICE_CIDR_LABEL" \
+          --arg hub_vcn_cidr "10.0.0.0/16" \
+          '[
+            {
+              "destination": $service_cidr,
+              "destinationType": "SERVICE_CIDR_BLOCK",
+              "networkEntityId": $sgw_ocid,
+              "description": "Platform Egress via Service Gateway (Managed by CI/CD)",
+              "routeType": "STATIC"
+            },
+            {
+              "cidrBlock": $hub_vcn_cidr,
+              "networkEntityId": $drg_ocid,
+              "description": "Route to Hub VCN via DRG (Managed by CI/CD)",
+              "routeType": "STATIC"
+            },
+            {
+              "cidrBlock": "0.0.0.0/0",
+              "networkEntityId": $nat_ocid,
+              "description": "Runtime Egress and Internet via NAT Gateway (Managed by CI/CD)",
+              "routeType": "STATIC"
+            }
+          ]')
+
+        echo "Attempting to update route table ${ROUTE_TABLE_OCID} with the following payload:"
+        echo "$FINAL_PAYLOAD" | jq .
+        
+        # --- Execute the update, replacing all existing rules with the definitive set ---
+        oci network route-table update --rt-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force
+        
+        echo "Successfully applied final three-rule configuration to route table."
 
     - name: 5b. Create or Update NSG and Enforce Correct Egress Rule    
       run: |
