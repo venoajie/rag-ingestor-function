@@ -65,27 +65,25 @@ jobs:
             exit 1
         fi
 
-        # --- REFACTOR: Query for the Service OCID, not its CIDR block ---
-        # The correct 'destination' for this type of route rule is the service's OCID.
         SERVICE_OCID=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].id | [0]" --raw-output)
-        
         if [ -z "$SERVICE_OCID" ] || [ "$SERVICE_OCID" == "null" ]; then
-            echo "Error: Could not find the OCID for the service name provided in the OCI_SERVICES_NETWORK_NAME secret. Please verify the secret's value."
+            echo "Error: Could not find the OCID for the service name provided in the OCI_SERVICES_NETWORK_NAME secret."
             exit 1
         fi
-        echo "Successfully discovered OCI Service OCID: $SERVICE_OCID"
 
-        CURRENT_RULES=$(oci network route-table get --route-table-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
-        # The check remains the same: we only care if a rule to the SGW exists.
-        RULE_EXISTS=$(echo "$CURRENT_RULES" | jq --arg sgw_ocid "$SERVICE_GATEWAY_OCID" 'map(select(."network-entity-id" == $sgw_ocid)) | length')
+        CURRENT_RULES_RAW=$(oci network route-table get --route-table-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
+        RULE_EXISTS=$(echo "$CURRENT_RULES_RAW" | jq --arg sgw_ocid "$SERVICE_GATEWAY_OCID" 'map(select(."network-entity-id" == $sgw_ocid)) | length')
 
         if [ "$RULE_EXISTS" -gt 0 ]; then
           echo "Service Gateway route already exists. No changes needed."
         else
           echo "Service Gateway route not found. Adding it to the route table..."
           
-          # --- REFACTOR: Construct the route rule using the correct API properties ---
-          # Use 'destination' (the service OCID) and 'destinationType', not 'cidrBlock'.
+          # --- REFACTOR: Sanitize the existing rules to remove read-only metadata ---
+          # This is the critical fix. We reconstruct the list of rules with only the fields
+          # that are valid for the 'update' command's schema.
+          CLEANED_RULES=$(echo "$CURRENT_RULES_RAW" | jq '[.[] | {cidrBlock, destination, destinationType, networkEntityId, description}]')
+
           NEW_RULE=$(jq -n \
             --arg dest_ocid "$SERVICE_OCID" \
             --arg sgw_ocid "$SERVICE_GATEWAY_OCID" \
@@ -96,10 +94,10 @@ jobs:
               "description": "Route to OCI Services via Service Gateway (Managed by CI/CD)"
             }')
             
-          UPDATED_RULES=$(echo "$CURRENT_RULES" | jq --argjson rule "$NEW_RULE" '. + [$rule]')
+          UPDATED_RULES=$(echo "$CLEANED_RULES" | jq --argjson rule "$NEW_RULE" '. + [$rule]')
           oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$UPDATED_RULES" --force
           echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
-        fi
+        fi        
         
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
