@@ -44,7 +44,6 @@ jobs:
         docker push "$IMAGE_TAG"
 
     - name: 5a. Ensure Service Gateway Route for Private Subnet
-    
       run: |
         set -e
         echo "Ensuring route table for private subnet has a Service Gateway route..."
@@ -105,6 +104,7 @@ EOF
           oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force
           echo "Successfully updated route table ${ROUTE_TABLE_OCID}."
         fi
+    
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
         set -e
