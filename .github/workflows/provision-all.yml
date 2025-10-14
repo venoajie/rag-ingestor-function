@@ -51,7 +51,7 @@ jobs:
         FINAL_PAYLOAD=$(jq -n --arg sgw_ocid "$SERVICE_GATEWAY_OCID" --arg nat_ocid "$NAT_GATEWAY_OCID" --arg service_cidr "$SERVICE_CIDR_LABEL" '[{"destination": $service_cidr,"destinationType": "SERVICE_CIDR_BLOCK","networkEntityId": $sgw_ocid,"description": "Platform Egress via SGW","routeType": "STATIC"},{"cidrBlock": "0.0.0.0/0","networkEntityId": $nat_ocid,"description": "General Egress via NAT","routeType": "STATIC"}]')
         oci network route-table update --rt-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force; echo "Successfully enforced final route table configuration."
 
-    - name: 5b. Create or Update NSG and Enforce Correct Egress Rule
+    - name: 5b. Create or Update NSG and Enforce Correct Egress Rule    
       run: |
         set -e
         echo "Ensuring NSG '${{ env.NSG_NAME }}' exists and has the correct egress rule..."
@@ -64,13 +64,16 @@ jobs:
         fi
         echo "NSG_OCID=${NSG_OCID}" >> $GITHUB_ENV
 
-        # --- RECONCILIATION STEP 1: Get all existing rule IDs ---
-        EXISTING_RULE_IDS=$(oci network nsg rules list --nsg-id "$NSG_OCID" --query "data[].id" --raw-output)
+        # --- RECONCILIATION STEP 1: Get all existing rule IDs as a JSON array ---
+        # This now correctly formats the output for the 'remove' command.
+        EXISTING_RULE_IDS_JSON=$(oci network nsg rules list --nsg-id "$NSG_OCID" --query "data[].id")
         
         # --- RECONCILIATION STEP 2: Remove all existing rules to ensure a clean state ---
-        if [ -n "$EXISTING_RULE_IDS" ]; then
+        # The check below handles cases where the NSG is new and the command returns an empty array '[]' or null.
+        if [ -n "$EXISTING_RULE_IDS_JSON" ] && [ "$EXISTING_RULE_IDS_JSON" != "[]" ] && [ "$EXISTING_RULE_IDS_JSON" != "null" ]; then
             echo "Found existing rules. Removing them to enforce a clean state..."
-            oci network nsg rules remove --nsg-id "$NSG_OCID" --security-rule-ids "$EXISTING_RULE_IDS" --force
+            # Use 'echo "y" |' to automatically confirm the interactive prompt.
+            echo "y" | oci network nsg rules remove --nsg-id "$NSG_OCID" --security-rule-ids "$EXISTING_RULE_IDS_JSON"
             echo "All existing rules removed."
         else
             echo "NSG is empty. No rules to remove."
@@ -101,7 +104,6 @@ jobs:
         echo "Adding definitive egress rule..."
         oci network nsg rules add --nsg-id "$NSG_OCID" --security-rules "$ADD_RULE_PAYLOAD"
         echo "Successfully enforced correct egress rule on NSG."
-
     - name: 5c. Create or Recreate Function Application with NSG
       run: |
         set -e
