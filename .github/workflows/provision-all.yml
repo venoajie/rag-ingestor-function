@@ -101,7 +101,7 @@ jobs:
         
         echo "Successfully applied final three-rule configuration to route table."
 
-    - name: 5b. Create or Update NSG and Enforce Correct Egress Rule    
+    - name: 5b. Create or Update NSG and Enforce Correct Egress Rule      
       run: |
         set -e
         echo "Ensuring NSG '${{ env.NSG_NAME }}' exists and has the correct egress rule..."
@@ -114,46 +114,41 @@ jobs:
         fi
         echo "NSG_OCID=${NSG_OCID}" >> $GITHUB_ENV
 
-        # --- RECONCILIATION STEP 1: Get all existing rule IDs as a JSON array ---
-        # This now correctly formats the output for the 'remove' command.
         EXISTING_RULE_IDS_JSON=$(oci network nsg rules list --nsg-id "$NSG_OCID" --query "data[].id")
         
-        # --- RECONCILIATION STEP 2: Remove all existing rules to ensure a clean state ---
-        # The check below handles cases where the NSG is new and the command returns an empty array '[]' or null.
         if [ -n "$EXISTING_RULE_IDS_JSON" ] && [ "$EXISTING_RULE_IDS_JSON" != "[]" ] && [ "$EXISTING_RULE_IDS_JSON" != "null" ]; then
             echo "Found existing rules. Removing them to enforce a clean state..."
-            # Use 'echo "y" |' to automatically confirm the interactive prompt.
             echo "y" | oci network nsg rules remove --nsg-id "$NSG_OCID" --security-rule-ids "$EXISTING_RULE_IDS_JSON"
             echo "All existing rules removed."
         else
             echo "NSG is empty. No rules to remove."
         fi
 
-        # --- RECONCILIATION STEP 3: Add the single, correct egress rule ---
-        SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output)
-        
+        # --- THE FINAL, CORRECT PAYLOAD ---
+        # The destination must be 0.0.0.0/0 to allow the function's runtime to egress
+        # via the NAT Gateway for authentication and other outbound calls.
         ADD_RULE_PAYLOAD=$(jq -n \
-          --arg dest "$SERVICE_CIDR_LABEL" \
           '[
             {
               "direction": "EGRESS",
               "protocol": "6",
               "isStateless": false,
-              "destination": $dest,
-              "destinationType": "SERVICE_CIDR_BLOCK",
+              "destination": "0.0.0.0/0",
+              "destinationType": "CIDR_BLOCK",
               "tcpOptions": {
                 "destinationPortRange": {
                   "min": 443,
                   "max": 443
                 }
               },
-              "description": "Allow runtime egress for RP auth (Managed by CI/CD)"
+              "description": "Allow runtime egress for RP auth via NAT Gateway (Managed by CI/CD)"
             }
           ]')
         
         echo "Adding definitive egress rule..."
         oci network nsg rules add --nsg-id "$NSG_OCID" --security-rules "$ADD_RULE_PAYLOAD"
         echo "Successfully enforced correct egress rule on NSG."
+
     - name: 5c. Create or Recreate Function Application with NSG
       run: |
         set -e
