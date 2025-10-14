@@ -124,28 +124,30 @@ jobs:
             echo "NSG is empty. No rules to remove."
         fi
 
-        # --- THE FINAL, CORRECT PAYLOAD ---
-        # The destination must be 0.0.0.0/0 to allow the function's runtime to egress
-        # via the NAT Gateway for authentication and other outbound calls.
+        # The destination must be the OCI Services Network to allow the function's runtime
+        # to egress via the Service Gateway for authentication.
+        SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output)
+        
         ADD_RULE_PAYLOAD=$(jq -n \
+          --arg dest "$SERVICE_CIDR_LABEL" \
           '[
             {
               "direction": "EGRESS",
               "protocol": "6",
               "isStateless": false,
-              "destination": "0.0.0.0/0",
-              "destinationType": "CIDR_BLOCK",
+              "destination": $dest,
+              "destinationType": "SERVICE_CIDR_BLOCK",
               "tcpOptions": {
                 "destinationPortRange": {
                   "min": 443,
                   "max": 443
                 }
               },
-              "description": "Allow runtime egress for RP auth via NAT Gateway (Managed by CI/CD)"
+              "description": "Allow runtime egress for RP auth via SGW (Managed by CI/CD)"
             }
           ]')
         
-        echo "Adding definitive egress rule..."
+        echo "Adding definitive egress rule to OCI Services Network..."
         oci network nsg rules add --nsg-id "$NSG_OCID" --security-rules "$ADD_RULE_PAYLOAD"
         echo "Successfully enforced correct egress rule on NSG."
 
