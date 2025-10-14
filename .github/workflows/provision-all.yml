@@ -1,4 +1,6 @@
 
+name: 'Provision Full Application Stack (Manual)'
+
 on:
   workflow_dispatch:
 
@@ -14,6 +16,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: 2. Configure OCI CLI
+      # ... (This step remains unchanged)
       run: |
         pip install --upgrade oci-cli jq
         mkdir -p ~/.oci
@@ -27,6 +30,7 @@ jobs:
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
 
     - name: 3. Log in to OCI Container Registry (OCIR)
+      # ... (This step remains unchanged)
       uses: docker/login-action@v3
       with:
         registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
@@ -34,6 +38,7 @@ jobs:
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
     - name: 4. Build and Push Docker Image
+      # ... (This step remains unchanged)
       run: |
         REPO_NAME=$(echo "${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}" | tr '[:upper:]' '[:lower:]')
         IMAGE_TAG="${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${REPO_NAME}:${{ github.sha }}"
@@ -41,82 +46,75 @@ jobs:
         docker build -t "$IMAGE_TAG" .
         docker push "$IMAGE_TAG"
 
-    # --- NEW STEP: Ensure networking prerequisites are met for private subnets ---
     - name: 5a. Ensure Service Gateway Route for Private Subnet
+      # ... (This step remains unchanged and is still required)
       run: |
         set -e
         echo "Ensuring route table for private subnet has a Service Gateway route..."
-        
-        # Discover the route table and VCN from the private subnet OCID
         SUBNET_DETAILS=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}")
         ROUTE_TABLE_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."route-table-id"')
         VCN_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."vcn-id"')
-        
         if [ "$ROUTE_TABLE_OCID" == "null" ] || [ "$VCN_OCID" == "null" ]; then
           echo "Error: Could not determine Route Table OCID or VCN OCID from the provided private subnet."
           exit 1
         fi
-        
-        # Discover the Service Gateway OCID within the VCN (assumes one exists)
         SERVICE_GATEWAY_OCID=$(oci network service-gateway list --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output || true)
         if [ -z "$SERVICE_GATEWAY_OCID" ]; then
             echo "Error: No Service Gateway found in VCN ${VCN_OCID}. A Service Gateway is required."
             exit 1
         fi
-
-        # Discover the CIDR block for "All Services in Oracle Services Network" for the current region
         OCI_REGION_UPPER=$(echo "${{ secrets.OCI_REGION }}" | tr 'a-z' 'A-Z')
         DESTINATION_CIDR=$(oci network service list --query "data[?name=='All ${OCI_REGION_UPPER} Services in Oracle Services Network'].cidrBlock" --raw-output | jq -r '.[0]')
         if [ -z "$DESTINATION_CIDR" ]; then
             echo "Error: Could not find the CIDR for OCI Services Network in region ${{ secrets.OCI_REGION }}."
             exit 1
         fi
-
-        # Get the current route rules
         CURRENT_RULES=$(oci network route-table get --route-table-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
-        
-        # Check if a rule for the Service Gateway already exists
         RULE_EXISTS=$(echo "$CURRENT_RULES" | jq --arg sgw_ocid "$SERVICE_GATEWAY_OCID" 'map(select(."network-entity-id" == $sgw_ocid)) | length')
-
         if [ "$RULE_EXISTS" -gt 0 ]; then
           echo "Service Gateway route already exists. No changes needed."
         else
           echo "Service Gateway route not found. Adding it to the route table..."
-          
-          # Construct the new rule as a JSON object
-          NEW_RULE=$(jq -n \
-            --arg cidr "$DESTINATION_CIDR" \
-            --arg sgw_ocid "$SERVICE_GATEWAY_OCID" \
-            '{
-              "cidrBlock": $cidr,
-              "networkEntityId": $sgw_ocid,
-              "description": "Route to OCI Services via Service Gateway (Managed by CI/CD)"
-            }')
-
-          # Append the new rule to the existing rules
+          NEW_RULE=$(jq -n --arg cidr "$DESTINATION_CIDR" --arg sgw_ocid "$SERVICE_GATEWAY_OCID" '{"cidrBlock": $cidr, "networkEntityId": $sgw_ocid, "description": "Route to OCI Services via Service Gateway (Managed by CI/CD)"}')
           UPDATED_RULES=$(echo "$CURRENT_RULES" | jq --argjson rule "$NEW_RULE" '. + [$rule]')
-          
-          # Update the route table with the combined set of rules
           oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$UPDATED_RULES" --force
           echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
         fi
 
-    - name: 5b. Create or Update OCI Function Application
+    # --- REWRITTEN STEP: Handle immutable subnet association ---
+    - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
+        set -e
         echo "Checking for existing application '${{ env.APP_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
-        
-        SUBNET_IDS='["${{ secrets.PRIVATE_SUBNET_OCID }}"]'
-        
+
+        CREATE_APP=false
         if [ -z "$APP_OCID" ] || [ "$APP_OCID" == "null" ]; then
-          echo "Application not found. Creating it in the designated PRIVATE function subnet..."
-          oci fn application create --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --subnet-ids "$SUBNET_IDS" 
+          echo "Application not found. It will be created."
+          CREATE_APP=true
         else
-          echo "Application found with OCID: $APP_OCID. Ensuring it uses the correct private subnet..."
-          oci fn application update --application-id "$APP_OCID" --subnet-ids "$SUBNET_IDS" --force
+          echo "Application found with OCID: $APP_OCID. Verifying its subnet configuration..."
+          CURRENT_SUBNET_OCID=$(oci fn application get --application-id "$APP_OCID" --query "data.\"subnet-ids\"[0]" --raw-output)
+          
+          if [ "$CURRENT_SUBNET_OCID" == "${{ secrets.PRIVATE_SUBNET_OCID }}" ]; then
+            echo "Application is already configured with the correct private subnet. No changes needed."
+          else
+            echo "Application is in the wrong subnet ($CURRENT_SUBNET_OCID). Deleting it to be recreated."
+            # Subnet association is immutable; we must delete and recreate if misconfigured.
+            oci fn application delete --application-id "$APP_OCID" --force
+            echo "Deletion complete. Application will be recreated."
+            CREATE_APP=true
+          fi
+        fi
+
+        if [ "$CREATE_APP" = true ]; then
+          echo "Creating application in the designated PRIVATE function subnet..."
+          SUBNET_IDS='["${{ secrets.PRIVATE_SUBNET_OCID }}"]'
+          oci fn application create --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --subnet-ids "$SUBNET_IDS"
         fi
 
     - name: 6. Create or Update OCI Function
+      # ... (This step remains unchanged)
       env:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
@@ -124,7 +122,6 @@ jobs:
         echo "Checking for existing function '${{ env.FUNCTION_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
-
         JSON_CONFIG=$(jq -n --arg fn_auth "resource_principal" --arg db_secret "$DB_SECRET_OCID" --arg namespace "$OCI_NAMESPACE" '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
           echo "Function not found. Creating it..."
@@ -135,6 +132,7 @@ jobs:
         fi
 
     - name: 7. Wait for IAM Propagation
+      # ... (This step remains unchanged)
       run: |
         echo "Waiting 60 seconds for IAM service to recognize the new/updated function..."
         sleep 60
