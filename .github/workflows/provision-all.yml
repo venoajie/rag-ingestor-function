@@ -79,10 +79,11 @@ jobs:
         else
           echo "Service Gateway route not found. Adding it to the route table..."
           
-          # --- REFACTOR: Sanitize the existing rules to remove read-only metadata ---
-          # This is the critical fix. We reconstruct the list of rules with only the fields
-          # that are valid for the 'update' command's schema.
-          CLEANED_RULES=$(echo "$CURRENT_RULES_RAW" | jq '[.[] | {cidrBlock, destination, destinationType, networkEntityId, description}]')
+          # --- FINAL REFACTOR: Use an intelligent jq filter to build a clean payload ---
+          # This filter iterates through each rule, breaks it into key-value pairs, selects ONLY the pairs
+          # with keys valid for an update, and reassembles them. This prevents creating keys with 'null' values.
+          ALLOWED_KEYS='["cidrBlock", "destination", "destinationType", "networkEntityId", "description"]'
+          CLEANED_RULES=$(echo "$CURRENT_RULES_RAW" | jq --argjson allowed "$ALLOWED_KEYS" '[.[] | (to_entries | map(select(.key as $k | $allowed | index($k))) | from_entries)]')
 
           NEW_RULE=$(jq -n \
             --arg dest_ocid "$SERVICE_OCID" \
@@ -97,7 +98,8 @@ jobs:
           UPDATED_RULES=$(echo "$CLEANED_RULES" | jq --argjson rule "$NEW_RULE" '. + [$rule]')
           oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$UPDATED_RULES" --force
           echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
-        fi        
+        fi
+        
         
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
