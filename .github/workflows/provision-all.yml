@@ -16,7 +16,6 @@ jobs:
       uses: actions/checkout@v4
 
     - name: 2. Configure OCI CLI
-      # ... (This step remains unchanged)
       run: |
         pip install --upgrade oci-cli jq
         mkdir -p ~/.oci
@@ -30,7 +29,6 @@ jobs:
         chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
 
     - name: 3. Log in to OCI Container Registry (OCIR)
-      # ... (This step remains unchanged)
       uses: docker/login-action@v3
       with:
         registry: ${{ secrets.OCI_REGION_KEY }}.ocir.io
@@ -38,7 +36,6 @@ jobs:
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
     - name: 4. Build and Push Docker Image
-      # ... (This step remains unchanged)
       run: |
         REPO_NAME=$(echo "${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}" | tr '[:upper:]' '[:lower:]')
         IMAGE_TAG="${{ secrets.OCI_REGION_KEY }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${REPO_NAME}:${{ github.sha }}"
@@ -47,30 +44,40 @@ jobs:
         docker push "$IMAGE_TAG"
 
     - name: 5a. Ensure Service Gateway Route for Private Subnet
-      # ... (This step remains unchanged and is still required)
       run: |
         set -e
         echo "Ensuring route table for private subnet has a Service Gateway route..."
+        
         SUBNET_DETAILS=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}")
         ROUTE_TABLE_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."route-table-id"')
         VCN_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."vcn-id"')
-        if [ "$ROUTE_TABLE_OCID" == "null" ] || [ "$VCN_OCID" == "null" ]; then
-          echo "Error: Could not determine Route Table OCID or VCN OCID from the provided private subnet."
+        
+        # --- FIX: Discover the VCN's compartment OCID ---
+        VCN_DETAILS=$(oci network vcn get --vcn-id "$VCN_OCID")
+        VCN_COMPARTMENT_OCID=$(echo "$VCN_DETAILS" | jq -r '.data."compartment-id"')
+        
+        if [ "$ROUTE_TABLE_OCID" == "null" ] || [ "$VCN_OCID" == "null" ] || [ "$VCN_COMPARTMENT_OCID" == "null" ]; then
+          echo "Error: Could not determine Route Table, VCN, or VCN Compartment OCID."
           exit 1
         fi
-        SERVICE_GATEWAY_OCID=$(oci network service-gateway list --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output || true)
+        
+        # --- FIX: Use the VCN_COMPARTMENT_OCID to list the service gateway ---
+        SERVICE_GATEWAY_OCID=$(oci network service-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output || true)
         if [ -z "$SERVICE_GATEWAY_OCID" ]; then
-            echo "Error: No Service Gateway found in VCN ${VCN_OCID}. A Service Gateway is required."
+            echo "Error: No Service Gateway found in VCN ${VCN_OCID}. A Service Gateway is required. Please create one manually."
             exit 1
         fi
+
         OCI_REGION_UPPER=$(echo "${{ secrets.OCI_REGION }}" | tr 'a-z' 'A-Z')
         DESTINATION_CIDR=$(oci network service list --query "data[?name=='All ${OCI_REGION_UPPER} Services in Oracle Services Network'].cidrBlock" --raw-output | jq -r '.[0]')
         if [ -z "$DESTINATION_CIDR" ]; then
             echo "Error: Could not find the CIDR for OCI Services Network in region ${{ secrets.OCI_REGION }}."
             exit 1
         fi
+
         CURRENT_RULES=$(oci network route-table get --route-table-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
         RULE_EXISTS=$(echo "$CURRENT_RULES" | jq --arg sgw_ocid "$SERVICE_GATEWAY_OCID" 'map(select(."network-entity-id" == $sgw_ocid)) | length')
+
         if [ "$RULE_EXISTS" -gt 0 ]; then
           echo "Service Gateway route already exists. No changes needed."
         else
@@ -81,13 +88,11 @@ jobs:
           echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
         fi
 
-    # --- REWRITTEN STEP: Handle immutable subnet association ---
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
         set -e
         echo "Checking for existing application '${{ env.APP_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
-
         CREATE_APP=false
         if [ -z "$APP_OCID" ] || [ "$APP_OCID" == "null" ]; then
           echo "Application not found. It will be created."
@@ -95,18 +100,15 @@ jobs:
         else
           echo "Application found with OCID: $APP_OCID. Verifying its subnet configuration..."
           CURRENT_SUBNET_OCID=$(oci fn application get --application-id "$APP_OCID" --query "data.\"subnet-ids\"[0]" --raw-output)
-          
           if [ "$CURRENT_SUBNET_OCID" == "${{ secrets.PRIVATE_SUBNET_OCID }}" ]; then
             echo "Application is already configured with the correct private subnet. No changes needed."
           else
             echo "Application is in the wrong subnet ($CURRENT_SUBNET_OCID). Deleting it to be recreated."
-            # Subnet association is immutable; we must delete and recreate if misconfigured.
             oci fn application delete --application-id "$APP_OCID" --force
             echo "Deletion complete. Application will be recreated."
             CREATE_APP=true
           fi
         fi
-
         if [ "$CREATE_APP" = true ]; then
           echo "Creating application in the designated PRIVATE function subnet..."
           SUBNET_IDS='["${{ secrets.PRIVATE_SUBNET_OCID }}"]'
@@ -114,11 +116,11 @@ jobs:
         fi
 
     - name: 6. Create or Update OCI Function
-      # ... (This step remains unchanged)
       env:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
+        # ... (script content is correct and remains the same)
         echo "Checking for existing function '${{ env.FUNCTION_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
@@ -132,7 +134,6 @@ jobs:
         fi
 
     - name: 7. Wait for IAM Propagation
-      # ... (This step remains unchanged)
       run: |
         echo "Waiting 60 seconds for IAM service to recognize the new/updated function..."
         sleep 60
