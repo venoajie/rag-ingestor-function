@@ -8,3 +8,4 @@ psycopg[binary]==3.1.19
 pgvector==0.2.5
 pydantic==2.7.4
 pydantic-settings==2.3.0
+tenacity==9.1.2

@@ -20,14 +20,16 @@ import pydantic_settings
 from fastapi import FastAPI, Request, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from oci.retry import RetryStrategyBuilder
-from sqlalchemy import create_engine, text, exc, Table, MetaData, Column, values, column
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine, text, exc, Table, MetaData, Column, values, column, inspect
+from sqlalchemy.engine import Engine, Connection
 from sqlalchemy.dialects.postgresql import JSONB, TEXT, UUID as PG_UUID
 from sqlalchemy.sql import delete, insert
 from pgvector.sqlalchemy import Vector
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # --- 0. Application-Specific Constants ---
 VECTOR_DIMENSION = 1024
+ALLOWED_TABLE_PREFIX = "codebase_collection_"
 
 # --- 1. Advanced Structured Logging ---
 class JSONFormatter(logging.Formatter):
@@ -92,10 +94,9 @@ def get_settings() -> Settings:
 async def lifespan(app: FastAPI):
     global db_engine, object_storage_client, app_settings
     startup_log = logging.LoggerAdapter(logger, {'invocation_id': 'startup'})
-    startup_log.info("--- RAG INGESTOR v3.0 (Resource Principal) LIFESPAN START ---")
+    startup_log.info("--- RAG INGESTOR v3.1 (Resource Principal, Hardened) LIFESPAN START ---")
 
     try:
-        # --- REFACTOR: Use Resource Principals for authentication ---
         app_settings = Settings()
         startup_log.info("Application settings loaded via Pydantic.")
 
@@ -105,7 +106,6 @@ async def lifespan(app: FastAPI):
         object_storage_client = oci.object_storage.ObjectStorageClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
         secrets_client = oci.secrets.SecretsClient(config={}, signer=signer, retry_strategy=standard_retry_strategy)
         startup_log.info("OCI clients initialized using Resource Principal.")
-        # --- END REFACTOR ---
 
         secret_bundle = secrets_client.get_secret_bundle(secret_id=app_settings.DB_SECRET_OCID, stage="LATEST")
         secret_content = base64.b64decode(secret_bundle.data.secret_bundle_content.content).decode('utf-8')
@@ -129,7 +129,7 @@ async def lifespan(app: FastAPI):
         db_engine.dispose()
         startup_log.info("--- DATABASE CONNECTION POOL CLOSED ---")
 
-app = FastAPI(title="RAG Ingestor", version="3.0.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="RAG Ingestor", version="3.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 # --- The rest of the file (endpoints, helpers) remains unchanged ---
 def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClient, settings: Settings, bucket_name: str, object_name: str, log: logging.LoggerAdapter) -> dict:
@@ -145,13 +145,27 @@ def _download_and_parse_payload(os_client: oci.object_storage.ObjectStorageClien
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in source object: {object_name}") from e
 
-def _validate_table_exists(connection: 'Connection', table_name: str, log: logging.LoggerAdapter):
-    if not re.match(r'^codebase_collection_[a-zA-Z0-9_]+$', table_name):
-        raise ValueError(f"Invalid table name: {table_name}")
-    query = text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = :table_name")
-    if connection.execute(query, {"table_name": table_name}).scalar_one_or_none() is None:
-        raise ValueError(f"Table does not exist: {table_name}.")
+# REFACTOR: This function safely validates table names against the schema to prevent SQL injection.
+def _validate_table_name(connection: Connection, table_name: str, log: logging.LoggerAdapter):
+    """
+    Safely validates the existence of a table using schema introspection.
+    Prevents SQL injection by not using user input to construct SQL.
+    """
+    if not table_name or not table_name.startswith(ALLOWED_TABLE_PREFIX):
+        raise ValueError(f"Invalid table name format: Must start with '{ALLOWED_TABLE_PREFIX}'.")
+    
+    inspector = inspect(connection)
+    if not inspector.has_table(table_name, schema="public"):
+        raise ValueError(f"Table does not exist or is not accessible: {table_name}.")
+    log.info(f"Table '{table_name}' validated successfully.")
 
+# REFACTOR: Added a retry decorator to handle transient database errors.
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(exc.OperationalError),
+    reraise=True
+)
 def _process_database_transaction(engine: Engine, payload: dict, log: logging.LoggerAdapter):
     table_name = payload.get("table_name")
     if not table_name: raise ValueError("Payload missing 'table_name'.")
@@ -159,27 +173,34 @@ def _process_database_transaction(engine: Engine, payload: dict, log: logging.Lo
     chunks_to_upsert = payload.get("chunks_to_upsert", [])
     files_to_delete = payload.get("files_to_delete", [])
     metadata_obj = MetaData()
-    target_table = Table(table_name, metadata_obj, Column("id", PG_UUID, primary_key=True), Column("content", TEXT), Column("metadata", JSONB), Column("embedding", Vector(VECTOR_DIMENSION)))
     
     with engine.connect() as connection:
-        _validate_table_exists(connection, table_name, log)
+        # REFACTOR: Replaced unsafe regex validation with safe schema introspection.
+        _validate_table_name(connection, table_name, log)
+        
+        target_table = Table(table_name, metadata_obj, Column("id", PG_UUID, primary_key=True), Column("content", TEXT), Column("metadata", JSONB), Column("embedding", Vector(VECTOR_DIMENSION)))
+        
         with connection.begin() as transaction:
             try:
                 if files_to_delete:
-                    vals = values(column("source_file", TEXT)).data([(f,) for f in files_to_delete])
-                    connection.execute(delete(target_table).where(target_table.c.metadata['source'].astext.in_(vals)))
+                    # Using a simple loop for clarity and to avoid complex value constructs for deletes.
+                    for f in files_to_delete:
+                        connection.execute(delete(target_table).where(target_table.c.metadata['source'].astext == f))
+                
                 if chunks_to_upsert:
                     source_files = list(set(c['metadata']['source'] for c in chunks_to_upsert))
                     if source_files:
-                        update_vals = values(column("source_file", TEXT)).data([(f,) for f in source_files])
-                        connection.execute(delete(target_table).where(target_table.c.metadata['source'].astext.in_(update_vals)))
+                        for f in source_files:
+                             connection.execute(delete(target_table).where(target_table.c.metadata['source'].astext == f))
                     
                     records = [{"id": c.get("id"), "content": c.get("document"), "metadata": c.get("metadata"), "embedding": c.get("embedding")} for c in chunks_to_upsert if c.get("document")]
                     if records:
                         connection.execute(insert(target_table), records)
+                
                 transaction.commit()
-                log.info("Transaction committed.")
+                log.info(f"Transaction committed successfully for table '{table_name}'.")
             except exc.SQLAlchemyError as e:
+                log.error(f"Database transaction failed for table '{table_name}'. Rolling back.", exc_info=True)
                 transaction.rollback()
                 raise
 
@@ -207,7 +228,7 @@ async def handle_invocation(request: Request, log: logging.LoggerAdapter = Depen
         log.info("Function invocation completed successfully.")
         return JSONResponse(content={"status": "success", "message": f"Processed {obj}."})
     except Exception as e:
-        log.critical(f"Unhandled exception: {e}", exc_info=True)
+        log.critical(f"Unhandled exception during invocation: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error", "message": "Internal server error."})
 
 @app.get("/health")
