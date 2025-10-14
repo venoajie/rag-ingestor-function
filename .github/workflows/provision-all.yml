@@ -43,6 +43,7 @@ jobs:
         docker build -t "$IMAGE_TAG" .
         docker push "$IMAGE_TAG"
 
+    # --- NEW STEP: Proven automation based on successful manual test ---
     - name: 5a. Ensure Service Gateway Route for Private Subnet
       run: |
         set -e
@@ -54,19 +55,26 @@ jobs:
         VCN_DETAILS=$(oci network vcn get --vcn-id "$VCN_OCID")
         VCN_COMPARTMENT_OCID=$(echo "$VCN_DETAILS" | jq -r '.data."compartment-id"')
         
+        if [ "$ROUTE_TABLE_OCID" == "null" ] || [ "$VCN_OCID" == "null" ] || [ "$VCN_COMPARTMENT_OCID" == "null" ]; then
+          echo "Error: Could not determine Route Table, VCN, or VCN Compartment OCID."
+          exit 1
+        fi
+        
         SERVICE_GATEWAY_OCID=$(oci network service-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output || true)
         if [ -z "$SERVICE_GATEWAY_OCID" ]; then
             echo "Error: No Service Gateway found in VCN ${VCN_OCID}. A Service Gateway is required."
             exit 1
         fi
 
-        SERVICE_OCID=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].id | [0]" --raw-output)
-        if [ -z "$SERVICE_OCID" ] || [ "$SERVICE_OCID" == "null" ]; then
-            echo "Error: Could not find the OCID for the service name provided in the OCI_SERVICES_NETWORK_NAME secret."
+        # Correctly query for the Service CIDR Label
+        SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output)
+        if [ -z "$SERVICE_CIDR_LABEL" ] || [ "$SERVICE_CIDR_LABEL" == "null" ]; then
+            echo "Error: Could not find the Service CIDR Label for the service name provided in the OCI_SERVICES_NETWORK_NAME secret."
             exit 1
         fi
+        echo "Successfully discovered Service CIDR Label: $SERVICE_CIDR_LABEL"
 
-        CURRENT_RULES_RAW=$(oci network route-table get --route-table-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
+        CURRENT_RULES_RAW=$(oci network route-table get --rt-id "$ROUTE_TABLE_OCID" --query "data.\"route-rules\"")
         RULE_EXISTS=$(echo "$CURRENT_RULES_RAW" | jq --arg sgw_ocid "$SERVICE_GATEWAY_OCID" 'map(select(."network-entity-id" == $sgw_ocid)) | length')
 
         if [ "$RULE_EXISTS" -gt 0 ]; then
@@ -74,16 +82,16 @@ jobs:
         else
           echo "Service Gateway route not found. Adding it to the route table."
           
-          # --- FINAL REFACTOR: Use jq to construct a clean, single-line JSON payload ---
-          # This approach is fundamentally safer as it avoids all multi-line formatting issues
-          # that can break the GitHub Actions YAML parser.
+          # --- PROVEN REFACTOR: Use jq to construct the payload ---
+          # This creates the exact JSON structure validated by the manual test,
+          # but uses jq to create a single-line string that is safe for the GitHub Actions YAML parser.
           FINAL_PAYLOAD=$(jq -n \
-            --arg dest_ocid "$SERVICE_OCID" \
+            --arg dest "$SERVICE_CIDR_LABEL" \
             --arg sgw_ocid "$SERVICE_GATEWAY_OCID" \
             --arg desc "Route to OCI Services via Service Gateway (Managed by CI/CD)" \
             '[
               {
-                "destination": $dest_ocid,
+                "destination": $dest,
                 "destinationType": "SERVICE_CIDR_BLOCK",
                 "networkEntityId": $sgw_ocid,
                 "description": $desc,
@@ -94,15 +102,17 @@ jobs:
           echo "Attempting to update with the following payload:"
           echo "$FINAL_PAYLOAD" | jq .
           
-          oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force
-          echo "Successfully updated route table ${ROUTE_TABLE_OCID}."
+          # Use the correct --rt-id parameter
+          oci network route-table update --rt-id "$ROUTE_TABLE_OCID" --route-rules "$FINAL_PAYLOAD" --force
+          echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
         fi
-        
+
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
         set -e
         echo "Checking for existing application '${{ env.APP_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
+
         CREATE_APP=false
         if [ -z "$APP_OCID" ] || [ "$APP_OCID" == "null" ]; then
           echo "Application not found. It will be created."
@@ -110,6 +120,7 @@ jobs:
         else
           echo "Application found with OCID: $APP_OCID. Verifying its subnet configuration..."
           CURRENT_SUBNET_OCID=$(oci fn application get --application-id "$APP_OCID" --query "data.\"subnet-ids\"[0]" --raw-output)
+          
           if [ "$CURRENT_SUBNET_OCID" == "${{ secrets.PRIVATE_SUBNET_OCID }}" ]; then
             echo "Application is already configured with the correct private subnet. No changes needed."
           else
@@ -119,6 +130,7 @@ jobs:
             CREATE_APP=true
           fi
         fi
+
         if [ "$CREATE_APP" = true ]; then
           echo "Creating application in the designated PRIVATE function subnet..."
           SUBNET_IDS='["${{ secrets.PRIVATE_SUBNET_OCID }}"]'
@@ -130,10 +142,10 @@ jobs:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
       run: |
-        # ... (script content is correct and remains the same)
         echo "Checking for existing function '${{ env.FUNCTION_NAME }}'..."
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output || true)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
+
         JSON_CONFIG=$(jq -n --arg fn_auth "resource_principal" --arg db_secret "$DB_SECRET_OCID" --arg namespace "$OCI_NAMESPACE" '{"FN_AUTH_METHOD": $fn_auth, "DB_SECRET_OCID": $db_secret, "OCI_NAMESPACE": $namespace}')
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
           echo "Function not found. Creating it..."
