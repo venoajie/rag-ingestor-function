@@ -51,8 +51,6 @@ jobs:
         SUBNET_DETAILS=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}")
         ROUTE_TABLE_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."route-table-id"')
         VCN_OCID=$(echo "$SUBNET_DETAILS" | jq -r '.data."vcn-id"')
-        
-        # --- FIX: Discover the VCN's compartment OCID ---
         VCN_DETAILS=$(oci network vcn get --vcn-id "$VCN_OCID")
         VCN_COMPARTMENT_OCID=$(echo "$VCN_DETAILS" | jq -r '.data."compartment-id"')
         
@@ -61,17 +59,20 @@ jobs:
           exit 1
         fi
         
-        # --- FIX: Use the VCN_COMPARTMENT_OCID to list the service gateway ---
         SERVICE_GATEWAY_OCID=$(oci network service-gateway list --compartment-id "$VCN_COMPARTMENT_OCID" --vcn-id "$VCN_OCID" --query "data[0].id" --raw-output || true)
         if [ -z "$SERVICE_GATEWAY_OCID" ]; then
             echo "Error: No Service Gateway found in VCN ${VCN_OCID}. A Service Gateway is required. Please create one manually."
             exit 1
         fi
 
+        # --- REFACTOR: Use a more robust, single-step JMESPath query to find the CIDR ---
+        # This avoids fragile piping between the OCI CLI and jq.
         OCI_REGION_UPPER=$(echo "${{ secrets.OCI_REGION }}" | tr 'a-z' 'A-Z')
-        DESTINATION_CIDR=$(oci network service list --query "data[?name=='All ${OCI_REGION_UPPER} Services in Oracle Services Network'].cidrBlock" --raw-output | jq -r '.[0]')
-        if [ -z "$DESTINATION_CIDR" ]; then
-            echo "Error: Could not find the CIDR for OCI Services Network in region ${{ secrets.OCI_REGION }}."
+        SERVICE_NAME="All ${OCI_REGION_UPPER} Services in Oracle Services Network"
+        DESTINATION_CIDR=$(oci network service list --query "data[?name=='${SERVICE_NAME}'].cidrBlock | [0]" --raw-output)
+        
+        if [ -z "$DESTINATION_CIDR" ] || [ "$DESTINATION_CIDR" == "null" ]; then
+            echo "Error: Could not find the CIDR for the OCI Services Network named '${SERVICE_NAME}'."
             exit 1
         fi
 
@@ -87,7 +88,7 @@ jobs:
           oci network route-table update --route-table-id "$ROUTE_TABLE_OCID" --route-rules "$UPDATED_RULES" --force
           echo "Successfully added Service Gateway route to table ${ROUTE_TABLE_OCID}."
         fi
-
+        
     - name: 5b. Create or Recreate OCI Function Application in Private Subnet
       run: |
         set -e
