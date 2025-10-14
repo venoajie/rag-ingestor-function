@@ -56,6 +56,7 @@ jobs:
         set -e
         echo "Ensuring NSG '${{ env.NSG_NAME }}' exists and has the correct egress rule..."
         NSG_OCID=$(oci network nsg list --compartment-id "${{ secrets.OCI_COMPARTMENT_OCID }}" --display-name "${{ env.NSG_NAME }}" --query "data[0].id" --raw-output || true)
+        
         if [ -z "$NSG_OCID" ]; then
           echo "NSG not found. Creating it..."
           VCN_OCID=$(oci network subnet get --subnet-id "${{ secrets.PRIVATE_SUBNET_OCID }}" | jq -r '.data."vcn-id"')
@@ -63,14 +64,42 @@ jobs:
         fi
         echo "NSG_OCID=${NSG_OCID}" >> $GITHUB_ENV
 
-        # Discover the Service CIDR Label (again, for this self-contained step)
+        # --- RECONCILIATION STEP 1: Get all existing rule IDs ---
+        EXISTING_RULE_IDS=$(oci network nsg rules list --nsg-id "$NSG_OCID" --query "data[].id" --raw-output)
+        
+        # --- RECONCILIATION STEP 2: Remove all existing rules to ensure a clean state ---
+        if [ -n "$EXISTING_RULE_IDS" ]; then
+            echo "Found existing rules. Removing them to enforce a clean state..."
+            oci network nsg rules remove --nsg-id "$NSG_OCID" --security-rule-ids "$EXISTING_RULE_IDS" --force
+            echo "All existing rules removed."
+        else
+            echo "NSG is empty. No rules to remove."
+        fi
+
+        # --- RECONCILIATION STEP 3: Add the single, correct egress rule ---
         SERVICE_CIDR_LABEL=$(oci network service list --query "data[?name=='${{ secrets.OCI_SERVICES_NETWORK_NAME }}'].\"cidr-block\" | [0]" --raw-output)
         
-        # Define the single, correct egress rule
-        CORRECT_RULE_PAYLOAD=$(jq -n --arg dest "$SERVICE_CIDR_LABEL" '[{"direction": "EGRESS", "protocol": "6", "isStateless": false, "destination": $dest, "destinationType": "SERVICE_CIDR_BLOCK", "tcpOptions": {"destinationPortRange": {"min": 443, "max": 443}}, "description": "Allow runtime egress for RP auth"}]')
+        ADD_RULE_PAYLOAD=$(jq -n \
+          --arg dest "$SERVICE_CIDR_LABEL" \
+          '[
+            {
+              "direction": "EGRESS",
+              "protocol": "6",
+              "isStateless": false,
+              "destination": $dest,
+              "destinationType": "SERVICE_CIDR_BLOCK",
+              "tcpOptions": {
+                "destinationPortRange": {
+                  "min": 443,
+                  "max": 443
+                }
+              },
+              "description": "Allow runtime egress for RP auth (Managed by CI/CD)"
+            }
+          ]')
         
-        # This replaces all existing rules with the one correct rule, enforcing a clean state
-        oci network nsg rules update --nsg-id "$NSG_OCID" --security-rules "$CORRECT_RULE_PAYLOAD"
+        echo "Adding definitive egress rule..."
+        oci network nsg rules add --nsg-id "$NSG_OCID" --security-rules "$ADD_RULE_PAYLOAD"
         echo "Successfully enforced correct egress rule on NSG."
 
     - name: 5c. Create or Recreate Function Application with NSG
