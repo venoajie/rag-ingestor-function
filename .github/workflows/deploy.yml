@@ -69,9 +69,10 @@ jobs:
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
         TARGET_BUCKET_NAME: ${{ secrets.TARGET_BUCKET_NAME }}
+        OCI_COMPARTMENT_OCID: ${{ secrets.OCI_COMPARTMENT_OCID }}
       run: |
         echo "Looking up function OCID..."
-        APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
+        APP_OCID=$(oci fn application list --compartment-id $OCI_COMPARTMENT_OCID --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output)
         if [ -z "$FUNCTION_OCID" ] || [ "$FUNCTION_OCID" == "null" ]; then
           echo "FATAL: Function not found. Run the 'Provision' workflow manually first." >&2
