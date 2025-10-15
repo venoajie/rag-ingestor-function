@@ -1,7 +1,4 @@
 
-# This is the definitive deployment script for the rag-ingestor.
-# It has been simplified to focus only on deploying the application code,
-# assuming the underlying network and parent Application are already provisioned.
 name: 'Provision RAG Ingestor (API Key Auth)'
 
 on:
@@ -38,14 +35,20 @@ jobs:
         username: ${{ secrets.OCIR_USERNAME }}
         password: ${{ secrets.OCIR_AUTH_TOKEN }}
 
-    - name: 4. Build and Push Docker Image
+    - name: 4. Set Image Tag Environment Variable
       run: |
         IMAGE_TAG="${{ secrets.OCI_REGION }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}:${{ github.sha }}"
         echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
-        docker build -t "${{ env.FULL_IMAGE_NAME }}" .
-        docker push "${{ env.FULL_IMAGE_NAME }}"
 
-    - name: 5. Create or Update OCI Function
+    - name: 5. Build and Push Docker Image
+      run: |
+        # --- THE FIX IS HERE ---
+        # Use shell variable syntax ($VAR) to access the variable set via $GITHUB_ENV.
+        docker build -t "$FULL_IMAGE_NAME" .
+        docker push "$FULL_IMAGE_NAME"
+        # --- END OF FIX ---
+
+    - name: 6. Create or Update OCI Function
       env:
         OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
         OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
@@ -83,7 +86,7 @@ jobs:
         TIMEOUT=$(yq '.timeout' func.yaml)
 
         if [ -z "$FUNCTION_OCID" ]; then
-          oci fn function create --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --image "${{ env.FULL_IMAGE_NAME }}" --memory-in-mbs "$MEMORY" --timeout-in-seconds "$TIMEOUT" --config "$JSON_CONFIG"
+          oci fn function create --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --image "$FULL_IMAGE_NAME" --memory-in-mbs "$MEMORY" --timeout-in-seconds "$TIMEOUT" --config "$JSON_CONFIG"
         else
-          oci fn function update --function-id "$FUNCTION_OCID" --image "${{ env.FULL_IMAGE_NAME }}" --memory-in-mbs "$MEMORY" --timeout-in-seconds "$TIMEOUT" --config "$JSON_CONFIG" --force
+          oci fn function update --function-id "$FUNCTION_OCID" --image "$FULL_IMAGE_NAME" --memory-in-mbs "$MEMORY" --timeout-in-seconds "$TIMEOUT" --config "$JSON_CONFIG" --force
         fi
