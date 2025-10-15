@@ -1,6 +1,6 @@
 
 # This is the corrected version.
-# It now uses the correct secret name 'OCI_PRIVATE_KEY_CONTENT' and the robust 'printf' command.
+# It Base64-encodes the private key before passing it as a configuration variable.
 name: 'Provision Hello World Function (Manual)'
 
 on:
@@ -21,10 +21,7 @@ jobs:
       run: |
         pip install oci-cli yq
         mkdir -p ~/.oci
-        # --- THE FIX IS HERE ---
-        # Using the correct secret name and the robust printf command.
         printf "%s\n" "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
-        # --- END OF FIX ---
         echo "[DEFAULT]" > ~/.oci/config
         echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
         echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
@@ -56,20 +53,21 @@ jobs:
         OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
         OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
         OCI_REGION: ${{ secrets.OCI_REGION }}
-        # --- THE FIX IS HERE ---
-        # Referencing the correct secret name.
         OCI_PRIVATE_KEY_CONTENT: ${{ secrets.OCI_PRIVATE_KEY_CONTENT }}
-        # --- END OF FIX ---
         DB_SECRET_OCID: ${{ secrets.DB_SECRET_OCID }}
         OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
         TARGET_BUCKET_NAME: ${{ secrets.TARGET_BUCKET_NAME }}
       run: |
+        # --- THE FIX IS HERE ---
+        # Base64-encode the key to ensure it is passed as a single, unbroken line.
+        B64_KEY=$(echo "$OCI_PRIVATE_KEY_CONTENT" | base64 -w 0)
+
         JSON_CONFIG=$(jq -n \
           --arg user_ocid "$OCI_USER_OCID" \
           --arg fingerprint "$OCI_FINGERPRINT" \
           --arg tenancy_ocid "$OCI_TENANCY_OCID" \
           --arg region "$OCI_REGION" \
-          --arg key_content "$OCI_PRIVATE_KEY_CONTENT" \
+          --arg b64_key_content "$B64_KEY" \
           --arg db_secret "$DB_SECRET_OCID" \
           --arg namespace "$OCI_NAMESPACE" \
           --arg bucket_name "$TARGET_BUCKET_NAME" \
@@ -78,32 +76,20 @@ jobs:
             "OCI_FINGERPRINT": $fingerprint,
             "OCI_TENANCY_OCID": $tenancy_ocid,
             "OCI_REGION": $region,
-            "OCI_PRIVATE_KEY_CONTENT": $key_content,
+            "OCI_PRIVATE_KEY_B64": $b64_key_content,
             "DB_SECRET_OCID": $db_secret,
             "OCI_NAMESPACE": $namespace,
             "TARGET_BUCKET_NAME": $bucket_name
           }')
+        # --- END OF FIX ---
 
         APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
         FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
-
         MEMORY=$(yq '.memory' func.yaml)
         TIMEOUT=$(yq '.timeout' func.yaml)
 
         if [ -z "$FUNCTION_OCID" ]; then
-          oci fn function create \
-            --application-id "$APP_OCID" \
-            --display-name "${{ env.FUNCTION_NAME }}" \
-            --image "${{ env.FULL_IMAGE_NAME }}" \
-            --memory-in-mbs "$MEMORY" \
-            --timeout-in-seconds "$TIMEOUT" \
-            --config "$JSON_CONFIG"
+          oci fn function create -d --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --image "${{ env.FULL_IMAGE_NAME }}" --memory-in-mbs "$MEMORY" --timeout-in-seconds "$TIMEOUT" --config "$JSON_CONFIG"
         else
-          oci fn function update \
-            --function-id "$FUNCTION_OCID" \
-            --image "${{ env.FULL_IMAGE_NAME }}" \
-            --memory-in-mbs "$MEMORY" \
-            --timeout-in-seconds "$TIMEOUT" \
-            --config "$JSON_CONFIG" \
-            --force
+          oci fn function update --function-id "$FUNCTION_OCID" --image "${{ env.FULL_IMAGE_NAME }}" --memory-in-mbs "$MEMORY" --timeout-in-seconds "$TIMEOUT" --config "$JSON_CONFIG" --force
         fi
