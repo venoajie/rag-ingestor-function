@@ -10,4 +10,4 @@ config:
   DB_SECRET_OCID: "${DB_SECRET_OCID}"
   OCI_NAMESPACE: "${OCI_NAMESPACE}"
 annotations:
-  oracle.com/oci/subnetIds: '["${PUBLIC_SUBNET_OCID}"]'
+  oracle.com/oci/subnetIds: '["${PRIVATE_SUBNET_OCID}"]'
