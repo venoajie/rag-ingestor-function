@@ -1,10 +1,9 @@
 
 """
-main.py - OCI Function with FastAPI using API Key Authentication (v2)
+main.py - OCI Function with FastAPI using API Key Authentication (v3)
 
-This version reads a Base64-encoded private key from the environment,
-decodes it at runtime, and writes it to a temporary file. This is the
-robust method for handling multi-line secrets.
+This version re-introduces the 'get_logger' dependency injection
+function that was accidentally omitted, which was causing a 'NameError'.
 """
 import base64
 import json
@@ -23,12 +22,10 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
 # --- Constants for Configuration and Keys ---
-# --- THE FIX IS HERE: Point to the Base64-encoded variable ---
 REQUIRED_AUTH_VARS = [
     "OCI_USER_OCID", "OCI_FINGERPRINT", "OCI_TENANCY_OCID",
     "OCI_REGION", "OCI_PRIVATE_KEY_B64"
 ]
-# --- END OF FIX ---
 
 # --- Logging Setup (No changes) ---
 class JSONFormatter(logging.Formatter):
@@ -52,7 +49,7 @@ handler.setFormatter(JSONFormatter())
 logger.addHandler(handler)
 logger.propagate = False
 
-# --- Global Clients & Connection Pool ---
+# --- Global Clients & Connection Pool (No changes) ---
 object_storage_client = None
 secrets_client = None
 db_pool = None
@@ -70,11 +67,9 @@ async def lifespan(app: FastAPI):
         if missing_vars:
             raise ValueError(f"Missing required OCI auth env vars: {', '.join(missing_vars)}")
 
-        # --- THE FIX IS HERE: Decode the key from Base64 ---
         b64_key_content = config_values["OCI_PRIVATE_KEY_B64"]
         decoded_key_bytes = base64.b64decode(b64_key_content)
         private_key_content = decoded_key_bytes.decode('utf-8')
-        # --- END OF FIX ---
 
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".pem") as key_file:
             key_file.write(private_key_content)
@@ -97,7 +92,6 @@ async def lifespan(app: FastAPI):
             raise ValueError("Missing critical configuration: DB_SECRET_OCID")
 
         secret_bundle = secrets_client.get_secret_bundle(secret_id=db_secret_ocid)
-        # (Rest of the function is unchanged)
         secret_content = secret_bundle.data.secret_bundle_content.content
         decoded_secret = base64.b64decode(secret_content).decode('utf-8')
         db_creds = json.loads(decoded_secret)
@@ -123,7 +117,13 @@ async def lifespan(app: FastAPI):
     if db_pool:
         await db_pool.close()
 
-# --- FastAPI App (Unchanged) ---
+# --- THE FIX: Re-introduce the missing dependency injection function ---
+def get_logger(fn_invoke_id: Annotated[str | None, Header(alias="fn-invoke-id")] = None) -> logging.LoggerAdapter:
+    invocation_id = fn_invoke_id or str(uuid.uuid4())
+    return logging.LoggerAdapter(logger, {'invocation_id': invocation_id})
+# --- END OF FIX ---
+
+# --- FastAPI App ---
 app = FastAPI(title="Hello World Writer", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 @app.post("/call")
