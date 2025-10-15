@@ -1,10 +1,3 @@
-
-"""
-main.py - RAG Ingestor (API Key Authentication Workaround)
-
-This version is re-architected to use API Key authentication, bypassing the
-failing Resource Principal mechanism. This is the definitive workaround.
-"""
 import base64
 import json
 import logging
@@ -17,7 +10,11 @@ from typing import Annotated
 
 import oci
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, JSONResponse
+from fastapi import Depends, FastAPI, Header, HTTPException
+# --- THE FIX IS HERE ---
+# JSONResponse is located in the fastapi.responses submodule.
+from fastapi.responses import JSONResponse
+# --- END OF FIX ---
 from psycopg_pool import AsyncConnectionPool
 
 # --- Constants for Configuration ---
