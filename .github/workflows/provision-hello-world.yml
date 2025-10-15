@@ -1,0 +1,84 @@
+
+name: 'Provision Hello World Function (Manual)'
+
+on:
+  workflow_dispatch:
+
+env:
+  APP_NAME: "hello-world-app"
+  FUNCTION_NAME: "postgres-inserter"
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 1. Check out repository
+      uses: actions/checkout@v4
+
+    - name: 2. Install and Configure OCI CLI and yq
+      run: |
+        pip install oci-cli yq
+        mkdir -p ~/.oci
+        echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+        echo "[DEFAULT]" > ~/.oci/config
+        echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
+        echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+        echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+        echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
+        echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+        chmod 600 ~/.oci/oci_api_key.pem ~/.oci/config
+
+    - name: 3. Log in to OCI Container Registry (OCIR)
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ secrets.OCI_REGION }}.ocir.io
+        username: ${{ secrets.OCIR_USERNAME }}
+        password: ${{ secrets.OCIR_AUTH_TOKEN }}
+
+    - name: 4. Set Image Tag Environment Variable
+      run: |
+        IMAGE_TAG="${{ secrets.OCI_REGION }}.ocir.io/${{ secrets.OCI_NAMESPACE }}/${{ env.APP_NAME }}/${{ env.FUNCTION_NAME }}:${{ github.sha }}"
+        echo "FULL_IMAGE_NAME=$IMAGE_TAG" >> $GITHUB_ENV
+
+    - name: 5. Build and Push Docker Image
+      run: |
+        docker build -t "${{ env.FULL_IMAGE_NAME }}" .
+        docker push "${{ env.FULL_IMAGE_NAME }}"
+
+    - name: 6. Create or Update OCI Function
+      run: |
+        echo "Looking up Application OCID..."
+        APP_OCID=$(oci fn application list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --display-name "${{ env.APP_NAME }}" --query "data[0].id" --raw-output)
+        if [ -z "$APP_OCID" ]; then
+          echo "FATAL: Application '${{ env.APP_NAME }}' not found in compartment."
+          exit 1
+        fi
+
+        echo "Looking for existing function '${{ env.FUNCTION_NAME }}'..."
+        FUNCTION_OCID=$(oci fn function list --application-id "$APP_OCID" --display-name "${{ env.FUNCTION_NAME }}" --query "data[0].id" --raw-output || true)
+
+        echo "Reading configuration from func.yaml..."
+        MEMORY=$(yq '.memory' func.yaml)
+        TIMEOUT=$(yq '.timeout' func.yaml)
+        INVOKE_ENDPOINT=$(yq '.annotations."fn.oci.oracle.com/fn/invokeEndpoint"' func.yaml)
+
+        if [ -z "$FUNCTION_OCID" ]; then
+          echo "Function not found. Creating it..."
+          oci fn function create \
+            --application-id "$APP_OCID" \
+            --display-name "${{ env.FUNCTION_NAME }}" \
+            --image "${{ env.FULL_IMAGE_NAME }}" \
+            --memory-in-mbs "$MEMORY" \
+            --timeout-in-seconds "$TIMEOUT"
+            # The fn-invoke-endpoint is not a valid parameter for 'create' or 'update'
+            # It should only be in the annotations of func.yaml
+        else
+          echo "Function found. Updating it..."
+          oci fn function update \
+            --function-id "$FUNCTION_OCID" \
+            --image "${{ env.FULL_IMAGE_NAME }}" \
+            --memory-in-mbs "$MEMORY" \
+            --timeout-in-seconds "$TIMEOUT" \
+            --force
+        fi
+        echo "✅ Provisioning successful!"
