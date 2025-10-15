@@ -9,3 +9,5 @@ config:
   FN_AUTH_METHOD: "resource_principal"
   DB_SECRET_OCID: "${DB_SECRET_OCID}"
   OCI_NAMESPACE: "${OCI_NAMESPACE}"
+annotations:
+  oracle.com/oci/subnetIds: '["${PRIVATE_SUBNET_OCID}"]'
