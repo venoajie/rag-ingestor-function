@@ -4,7 +4,7 @@ name: rag-ingestor
 version: 3.0.0
 runtime: docker
 memory: 1024
-timeout: 120
+timeout: 300
 annotations:
   # This tells the API Gateway and Fn platform which path inside the
   # container the function is listening on.
