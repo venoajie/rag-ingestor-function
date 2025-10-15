@@ -1,11 +1,13 @@
 
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-uvloop==0.21.0
 oci==2.126.0
-sqlalchemy==2.0.30
-psycopg[binary]==3.1.19
+fastapi==0.111.0
 pgvector==0.2.5
+psycopg[binary]==3.1.19
+psycopg_pool[binary]==3.2.1
 pydantic==2.7.4
 pydantic-settings==2.3.0
+sqlalchemy==2.0.30
 tenacity==9.1.2
+uvicorn[standard]==0.29.0
+uvloop==0.21.0
+
